@@ -48,19 +48,41 @@ code // or `coder` if you're using VS Code
 
 Note: If another tool already provides a `code` command (e.g. VS Code), our CLI is also installed as `coder`. Use `coder` to avoid conflicts.
 
-**Authenticate** (one of the following):
+**Authenticate** (choose one or use multiple):
 - **Sign in with ChatGPT** (Plus/Pro/Team; uses models available to your plan)
   - Run `code` and pick "Sign in with ChatGPT"
   - Stores creds locally at `~/.coder/auth.json` (also reads legacy `~/.codex/auth.json`)
-- **API key** (usage-based)
-  - Set `export OPENAI_API_KEY=xyz` and run `code`
+- **Sign in with Claude Max** (Recommended for enhanced performance)
+  - Run `code auth login --provider claude` for Claude Max subscription
+  - Automatic quota management and intelligent provider selection
+  - Premium features: unlimited messages, priority access, enhanced reasoning
+- **API keys** (usage-based)
+  - OpenAI: Set `export OPENAI_API_KEY=xyz` and run `code`
+  - Claude: Set `export ANTHROPIC_API_KEY=xyz` or use `code auth login --provider claude --api-key sk-ant-...`
+
+### Claude Authentication Integration
+
+**Code** now supports Claude Max subscriptions directly! Enjoy unlimited conversations, priority access, and enhanced performance.
+
+```bash
+# Authenticate with Claude Max (recommended)
+code auth login --provider claude
+
+# Check authentication status  
+code auth status --detailed
+
+# View Claude Max quota (if applicable)
+code auth quota
+
+# Switch between providers
+code auth switch claude  # or 'openai' or 'auto'
+```
 
 ### Install Claude & Gemini (optional)
 
 Code supports orchestrating other AI CLI tools. Install these and config to use alongside Code.
 
 ```bash
-
 npm install -g @anthropic-ai/claude-code @google/gemini-cli && claude "Just checking you're working! Let me know how I can exit." && gemini -i "Just checking you're working! Let me know how I can exit."
 ```
 
@@ -84,13 +106,24 @@ npm install -g @anthropic-ai/claude-code @google/gemini-cli && claude "Just chec
 # All agents review task and create a consolidated plan
 /plan "Stop the AI from ordering pizza at 3AM"
 
-# Solve complex problems (Claude, Gemini and GPT-5 race)
+# Solve complex problems (Claude, Gemini and GPT-5 race)  
 # Fastest preferred (see https://arxiv.org/abs/2505.17813)
 /solve "Why does deleting one user drop the whole database?"
 
 # Write code! (Claude, Gemini and GPT-5 consensus)
 # Creates multiple worktrees then implements the optimal solution
 /code "Show dark mode when I feel cranky"
+```
+
+### Authentication
+```bash
+# Multi-provider authentication
+code auth login                     # Auto-select best provider
+code auth login --provider claude   # Use Claude Max
+code auth login --provider openai   # Use OpenAI
+code auth status --detailed         # Show auth status
+code auth switch claude            # Switch active provider
+code auth quota                    # Check Claude Max quotas
 ```
 
 ### General
@@ -210,8 +243,10 @@ model_reasoning_summary = "detailed"
 ### Environment variables
 
 - `CODEX_HOME`: Override config directory location
-- `OPENAI_API_KEY`: Use API key instead of ChatGPT auth
-- `OPENAI_BASE_URL`: Use alternative API endpoints
+- `OPENAI_API_KEY`: Use OpenAI API key instead of ChatGPT auth
+- `OPENAI_BASE_URL`: Use alternative OpenAI API endpoints
+- `ANTHROPIC_API_KEY`: Use Claude API key instead of Claude Max auth
+- `CLAUDE_API_KEY`: Alternative Claude API key variable (auto-mapped)
 
 &ensp;
 ## FAQ

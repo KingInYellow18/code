@@ -1,6 +1,60 @@
 # Authentication
 
-## Usage-based billing alternative: Use an OpenAI API key
+## Multi-Provider Authentication
+
+Code supports multiple authentication providers to give you the best AI experience:
+
+- **Claude Max/Pro**: Premium subscription with unlimited messages and priority access
+- **OpenAI ChatGPT**: Plus/Pro/Team plans with usage-based on your subscription
+- **API Keys**: Usage-based billing for both Claude and OpenAI
+
+### Quick Setup
+
+```bash
+# Authenticate with Claude Max (recommended)
+code auth login --provider claude
+
+# Authenticate with OpenAI ChatGPT
+code auth login --provider openai
+
+# Use auto-selection (tries Claude first, falls back to OpenAI)
+code auth login
+
+# Check status
+code auth status --detailed
+```
+
+## Claude Authentication
+
+### Claude Max/Pro Subscription (Recommended)
+
+Claude Max provides unlimited conversations and enhanced performance:
+
+```bash
+# Authenticate with Claude subscription
+code auth login --provider claude
+
+# Check subscription status and quota
+code auth status --provider claude --detailed
+code auth quota --detailed
+```
+
+### Claude API Key
+
+For usage-based billing with Claude:
+
+```shell
+export ANTHROPIC_API_KEY="sk-ant-api03-your-key-here"
+```
+
+Or authenticate directly:
+```bash
+code auth login --provider claude --api-key sk-ant-api03-...
+```
+
+## OpenAI Authentication
+
+### Usage-based billing alternative: Use an OpenAI API key
 
 If you prefer to pay-as-you-go, you can still authenticate with your OpenAI API key by setting it as an environment variable:
 
@@ -18,21 +72,86 @@ If you've used the Codex CLI before with usage-based billing via an API key and 
 2. Delete `~/.codex/auth.json` (on Windows: `C:\\Users\\USERNAME\\.codex\\auth.json`)
 3. Run `codex login` again
 
-## Forcing a specific auth method (advanced)
+## Provider Selection and Preferences
 
-You can explicitly choose which authentication Codex should prefer when both are available.
+### Automatic Provider Selection
+
+Code intelligently selects the best available provider:
+
+```bash
+# Enable auto-selection
+code auth switch auto
+
+# Check which provider is being used
+code auth status --detailed
+```
+
+Selection priority:
+1. Claude Max subscription (if authenticated)
+2. Claude Pro subscription (if authenticated) 
+3. OpenAI ChatGPT (if authenticated)
+4. Claude API key (if available)
+5. OpenAI API key (if available)
+
+### Manual Provider Selection
+
+You can explicitly choose which provider to use:
+
+```bash
+# Switch to Claude
+code auth switch claude
+
+# Switch to OpenAI
+code auth switch openai
+
+# Check current provider
+code auth status
+```
+
+### Configuration File Settings
+
+```toml
+# ~/.codex/config.toml
+preferred_auth_provider = "claude"  # "claude" | "openai" | "auto"
+
+[claude]
+auto_fallback_enabled = true       # Fall back to OpenAI if Claude quota exhausted
+quota_warning_threshold = 0.8      # Warn at 80% quota usage
+
+# Provider-specific profiles
+[profiles.claude-max]
+model = "claude-3-opus-20240229"
+model_provider = "claude"
+approval_policy = "never"
+
+[profiles.openai-gpt4]
+model = "gpt-4"
+model_provider = "openai"
+approval_policy = "on_request"
+```
+
+### CLI Override
+
+```bash
+# Use specific provider for one command
+code --provider claude "Analyze this code"
+code --provider openai "Generate documentation"
+
+# Override configuration
+code --config preferred_auth_provider="claude" "Hello"
+```
+
+## Legacy OpenAI Configuration
+
+### Forcing a specific auth method (advanced)
+
+You can explicitly choose which OpenAI authentication method to prefer:
 
 - To always use your API key (even when ChatGPT auth exists), set:
 
 ```toml
 # ~/.codex/config.toml
 preferred_auth_method = "apikey"
-```
-
-Or override ad-hoc via CLI:
-
-```bash
-codex --config preferred_auth_method="apikey"
 ```
 
 - To prefer ChatGPT auth (default), set:
@@ -45,25 +164,42 @@ preferred_auth_method = "chatgpt"
 Notes:
 
 - When `preferred_auth_method = "apikey"` and an API key is available, the login screen is skipped.
-- When `preferred_auth_method = "chatgpt"` (default), Codex prefers ChatGPT auth if present; if only an API key is present, it will use the API key. Certain account types may also require API-key mode.
-- To check which auth method is being used during a session, use the `/status` command in the TUI.
+- When `preferred_auth_method = "chatgpt"` (default), Code prefers ChatGPT auth if present; if only an API key is present, it will use the API key.
+- To check which auth method is being used during a session, use the `/status` command in the TUI or `code auth status --detailed`.
 
-## Project .env safety (OPENAI_API_KEY)
+## Project .env safety
 
-By default, Codex will no longer read `OPENAI_API_KEY` or `AZURE_OPENAI_API_KEY` from a project’s local `.env` file.
+### API Key Environment Variables
 
-Why: many repos include an API key in `.env` for unrelated tooling, which could cause Codex to silently use the API key instead of your ChatGPT plan in that folder.
+By default, Code will no longer read `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `CLAUDE_API_KEY` from a project's local `.env` file.
 
-What still works:
+**Why:** Many repos include API keys in `.env` for unrelated tooling, which could cause Code to silently use the API key instead of your preferred subscription plan.
 
-- `~/.code/.env` (or `~/.codex/.env`) is loaded first and may contain your `OPENAI_API_KEY` for global use.
-- A shell-exported `OPENAI_API_KEY` is honored.
+**What still works:**
 
-Project `.env` provider keys are always ignored — there is no opt‑in.
+- `~/.code/.env` (or `~/.codex/.env`) is loaded first and may contain API keys for global use
+- Shell-exported environment variables are honored:
+  ```bash
+  export OPENAI_API_KEY="sk-..."
+  export ANTHROPIC_API_KEY="sk-ant-api03-..."
+  export CLAUDE_API_KEY="sk-ant-api03-..."  # Alternative name, auto-mapped
+  ```
 
-UI clarity:
+**Project `.env` provider keys are always ignored** — there is no opt‑in.
 
-- When Codex is using an API key, the chat footer shows a bold “Auth: API key” badge so it’s obvious which mode you’re in.
+### UI clarity
+
+The TUI shows clear provider information:
+
+- **Claude Max**: "Auth: Claude Max" with quota indicator
+- **Claude API**: "Auth: Claude API" badge
+- **OpenAI ChatGPT**: "Auth: ChatGPT" badge  
+- **OpenAI API**: "Auth: OpenAI API" badge
+
+Check current provider anytime:
+```bash
+code auth status --detailed
+```
 
 ## Connecting on a "Headless" Machine
 

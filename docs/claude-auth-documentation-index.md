@@ -7,6 +7,8 @@ This index provides a comprehensive guide to all documentation related to Claude
 ## Quick Navigation
 
 ### For New Users
+- ⚡ **[Claude Max Quick Start](claude-max-quickstart.md)** - **5-minute setup without API keys** 
+- 🚀 **[Claude Max Setup Guide](claude-max-setup-guide.md)** - **Complete end-to-end authentication guide**
 - 🚀 **[Setup Guide](claude-auth-setup-guide.md)** - Complete setup instructions for Claude authentication
 - 📖 **[Updated Authentication Docs](authentication.md)** - Main authentication documentation with Claude integration
 - 🔧 **[CLI Commands Reference](cli_commands_reference.md)** - Complete command reference for multi-provider authentication
@@ -30,6 +32,8 @@ This index provides a comprehensive guide to all documentation related to Claude
 
 | Document | Purpose | Audience |
 |----------|---------|----------|
+| **[Claude Max Quick Start](claude-max-quickstart.md)** | 5-minute setup without API keys | New users |
+| **[Claude Max Setup Guide](claude-max-setup-guide.md)** | Complete end-to-end authentication | New users |
 | **[Setup Guide](claude-auth-setup-guide.md)** | Complete setup walkthrough | All users |
 | **[Main README](../README.md)** | Project overview with auth info | All users |
 | **[Authentication Docs](authentication.md)** | Updated auth documentation | All users |
@@ -53,10 +57,10 @@ This index provides a comprehensive guide to all documentation related to Claude
 
 ## Getting Started Paths
 
-### Path 1: New Claude Max User
-1. **[Setup Guide](claude-auth-setup-guide.md)** → Quick Start → Claude Max Subscription
-2. **[CLI Commands Reference](cli_commands_reference.md)** → `code auth login --provider claude`
-3. **[Configuration Reference](claude-auth-configuration.md)** → Best Practices
+### Path 1: New Claude Max User (Recommended)
+1. **[Claude Max Quick Start](claude-max-quickstart.md)** → 5-minute setup
+2. **[Claude Max Setup Guide](claude-max-setup-guide.md)** → Complete guide with troubleshooting
+3. **[CLI Commands Reference](cli_commands_reference.md)** → Advanced commands
 
 ### Path 2: Existing OpenAI User Adding Claude
 1. **[Migration Guide](claude-auth-migration-guide.md)** → Scenario 1: OpenAI-Only to Dual Provider
@@ -177,6 +181,8 @@ code auth providers
 
 | Document | Status | Last Updated | Completeness |
 |----------|--------|--------------|--------------|
+| Claude Max Quick Start | ✅ Complete | 2025-09-13 | 100% |
+| Claude Max Setup Guide | ✅ Complete | 2025-09-13 | 100% |
 | Setup Guide | ✅ Complete | 2025-09-13 | 100% |
 | Authentication Docs | ✅ Complete | 2025-09-13 | 100% |
 | CLI Commands Reference | ✅ Complete | 2025-09-13 | 100% |

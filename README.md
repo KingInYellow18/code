@@ -60,23 +60,30 @@ Note: If another tool already provides a `code` command (e.g. VS Code), our CLI 
   - OpenAI: Set `export OPENAI_API_KEY=xyz` and run `code`
   - Claude: Set `export ANTHROPIC_API_KEY=xyz` or use `code auth login --provider claude --api-key sk-ant-...`
 
-### Claude Authentication Integration
+### 🚀 Claude Max Authentication (No API Keys Required!)
 
-**Code** now supports Claude Max subscriptions directly! Enjoy unlimited conversations, priority access, and enhanced performance.
+**Code** now supports Claude Max subscriptions directly! Authenticate using your Claude Max account without any API keys.
 
+#### ⚡ Quick Start (5 minutes)
 ```bash
-# Authenticate with Claude Max (recommended)
+# One command setup with Claude Max
 code auth login --provider claude
+# Browser opens → Login with Claude Max → Done!
+```
 
+#### Full Feature Commands
+```bash
 # Check authentication status  
 code auth status --detailed
 
-# View Claude Max quota (if applicable)
+# View Claude Max quota and usage
 code auth quota
 
 # Switch between providers
 code auth switch claude  # or 'openai' or 'auto'
 ```
+
+📖 **[Complete Setup Guide](./docs/claude-max-setup-guide.md)** | ⚡ **[5-Minute Quick Start](./docs/claude-max-quickstart.md)** | 🔧 **[Troubleshooting](./docs/claude-auth-troubleshooting.md)**
 
 ### Install Claude & Gemini (optional)
 

@@ -13,7 +13,7 @@ use crate::app::ChatWidgetArgs;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::onboarding::auth::AuthModeWidget;
-use crate::onboarding::auth::SignInState;
+use crate::onboarding::auth::{SignInState, SignInProvider, OpenAIAuthState};
 use crate::onboarding::continue_to_chat::ContinueToChatWidget;
 use crate::onboarding::trust_directory::TrustDirectorySelection;
 use crate::onboarding::trust_directory::TrustDirectoryWidget;
@@ -76,12 +76,16 @@ impl OnboardingScreen {
         if show_login_screen {
             steps.push(Step::Auth(AuthModeWidget {
                 event_tx: event_tx.clone(),
+                highlighted_provider: SignInProvider::OpenAI(OpenAIAuthState { 
+                    mode: AuthMode::ChatGPT 
+                }),
                 highlighted_mode: AuthMode::ChatGPT,
                 error: None,
-                sign_in_state: SignInState::PickMode,
+                sign_in_state: SignInState::PickProvider,
                 codex_home: codex_home.clone(),
                 login_status,
                 preferred_auth_method: codex_login::AuthMode::ApiKey,
+                unified_auth: None,
             }))
         }
         let is_git_repo = get_git_repo_root(&cwd).is_some();

@@ -1,0 +1,52 @@
+{
+  "name": "@kinginyyellow/code-claude",
+  "version": "0.2.144-claude-beta.0",
+  "license": "Apache-2.0",
+  "description": "Claude Code with Claude Max authentication - Enhanced fork with OAuth integration",
+  "keywords": ["claude", "openai", "ai", "coding", "assistant", "cli", "oauth", "authentication"],
+  "bin": {
+    "code-claude": "bin/coder.js",
+    "claude-code": "bin/coder.js"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin/coder.js",
+    "bin/codex.js", 
+    "postinstall.js",
+    "scripts/preinstall.js",
+    "scripts/windows-cleanup.ps1",
+    "dist"
+  ],
+  "scripts": {
+    "preinstall": "node scripts/preinstall.js",
+    "postinstall": "node postinstall.js",
+    "prepublishOnly": "echo 'Publishing @kinginyyellow/code-claude beta version with Claude authentication...'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KingInYellow18/code.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
+  },
+  "homepage": "https://github.com/KingInYellow18/code#readme",
+  "bugs": {
+    "url": "https://github.com/KingInYellow18/code/issues"
+  },
+  "author": "KingInYellow18 <KingInYellow18@proton.me>",
+  "dependencies": {},
+  "devDependencies": {
+    "prettier": "^3.3.3"
+  },
+  "optionalDependencies": {
+    "@kinginyyellow/code-claude-darwin-arm64": "0.2.144-claude-beta.0",
+    "@kinginyyellow/code-claude-darwin-x64": "0.2.144-claude-beta.0", 
+    "@kinginyyellow/code-claude-linux-x64-musl": "0.2.144-claude-beta.0",
+    "@kinginyyellow/code-claude-linux-arm64-musl": "0.2.144-claude-beta.0",
+    "@kinginyyellow/code-claude-win32-x64": "0.2.144-claude-beta.0"
+  }
+}

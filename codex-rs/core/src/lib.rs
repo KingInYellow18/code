@@ -7,8 +7,12 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 mod agent_tool;
+pub mod agent_auth;
 mod apply_patch;
 pub mod auth;
+pub mod claude_auth;
+pub mod claude_oauth;
+pub mod unified_auth;
 mod bash;
 mod chat_completions;
 mod client;
@@ -55,6 +59,12 @@ pub use conversation_manager::NewConversation;
 // Re-export common auth types for workspace consumers
 pub use auth::AuthManager;
 pub use auth::CodexAuth;
+pub use claude_auth::ClaudeAuth;
+pub use claude_auth::ClaudeAuthMode;
+pub use claude_auth::ClaudeTokenData;
+pub use unified_auth::UnifiedAuthManager;
+pub use unified_auth::AuthProvider;
+pub use unified_auth::ProviderSelectionStrategy;
 pub mod default_client;
 pub mod model_family;
 mod openai_model_info;

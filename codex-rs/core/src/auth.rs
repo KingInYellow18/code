@@ -19,6 +19,7 @@ use codex_protocol::mcp_protocol::AuthMode;
 
 use crate::token_data::TokenData;
 use crate::token_data::parse_id_token;
+use crate::claude_auth::{ClaudeAuth, ClaudeAuthMode};
 
 #[derive(Debug, Clone)]
 pub struct CodexAuth {
@@ -422,6 +423,13 @@ struct CachedAuth {
     auth: Option<CodexAuth>,
 }
 
+/// Internal cached Claude auth state.
+#[derive(Clone, Debug)]
+struct CachedClaudeAuth {
+    preferred_auth_mode: ClaudeAuthMode,
+    auth: Option<ClaudeAuth>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,6 +678,38 @@ mod tests {
     }
 }
 
+/// Provider type for authentication selection
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProviderType {
+    OpenAI,
+    Claude,
+}
+
+/// Authentication provider enum supporting both OpenAI and Claude
+#[derive(Debug, Clone)]
+pub enum AuthProvider {
+    OpenAI(CodexAuth),
+    Claude(ClaudeAuth),
+}
+
+impl AuthProvider {
+    /// Get authentication token from either provider
+    pub async fn get_token(&self) -> Result<String, std::io::Error> {
+        match self {
+            AuthProvider::OpenAI(auth) => auth.get_token().await,
+            AuthProvider::Claude(auth) => auth.get_token().await,
+        }
+    }
+
+    /// Get provider type
+    pub fn provider_type(&self) -> ProviderType {
+        match self {
+            AuthProvider::OpenAI(_) => ProviderType::OpenAI,
+            AuthProvider::Claude(_) => ProviderType::Claude,
+        }
+    }
+}
+
 /// Central manager providing a single source of truth for auth.json derived
 /// authentication data. It loads once (or on preference change) and then
 /// hands out cloned `CodexAuth` values so the rest of the program has a
@@ -678,11 +718,14 @@ mod tests {
 /// External modifications to `auth.json` will NOT be observed until
 /// `reload()` is called explicitly. This matches the design goal of avoiding
 /// different parts of the program seeing inconsistent auth data mid‑run.
+///
+/// Now supports both OpenAI and Claude authentication providers.
 #[derive(Debug)]
 pub struct AuthManager {
     codex_home: PathBuf,
     originator: String,
     inner: RwLock<CachedAuth>,
+    claude_inner: RwLock<CachedClaudeAuth>,
 }
 
 impl AuthManager {
@@ -694,12 +737,22 @@ impl AuthManager {
         let auth = CodexAuth::from_codex_home(&codex_home, preferred_auth_mode, &originator)
             .ok()
             .flatten();
+        
+        // Also try to load Claude auth with MaxSubscription as default preference
+        let claude_auth = ClaudeAuth::from_codex_home(&codex_home, ClaudeAuthMode::MaxSubscription, &originator)
+            .ok()
+            .flatten();
+            
         Self {
             codex_home,
             originator,
             inner: RwLock::new(CachedAuth {
                 preferred_auth_mode,
                 auth,
+            }),
+            claude_inner: RwLock::new(CachedClaudeAuth {
+                preferred_auth_mode: ClaudeAuthMode::MaxSubscription,
+                auth: claude_auth,
             }),
         }
     }
@@ -715,12 +768,39 @@ impl AuthManager {
             codex_home: PathBuf::new(),
             originator: "codex_cli_rs".to_string(),
             inner: RwLock::new(cached),
+            claude_inner: RwLock::new(CachedClaudeAuth {
+                preferred_auth_mode: ClaudeAuthMode::MaxSubscription,
+                auth: None,
+            }),
+        })
+    }
+
+    /// Create an AuthManager with specific Claude auth, for testing only.
+    pub fn from_claude_auth_for_testing(auth: ClaudeAuth) -> Arc<Self> {
+        let preferred_auth_mode = auth.mode;
+        let cached_claude = CachedClaudeAuth {
+            preferred_auth_mode,
+            auth: Some(auth),
+        };
+        Arc::new(Self {
+            codex_home: PathBuf::new(),
+            originator: "codex_cli_rs".to_string(),
+            inner: RwLock::new(CachedAuth {
+                preferred_auth_mode: AuthMode::ApiKey,
+                auth: None,
+            }),
+            claude_inner: RwLock::new(cached_claude),
         })
     }
 
     /// Current cached auth (clone). May be `None` if not logged in or load failed.
     pub fn auth(&self) -> Option<CodexAuth> {
         self.inner.read().ok().and_then(|c| c.auth.clone())
+    }
+
+    /// Current cached Claude auth (clone). May be `None` if not logged in or load failed.
+    pub fn claude_auth(&self) -> Option<ClaudeAuth> {
+        self.claude_inner.read().ok().and_then(|c| c.auth.clone())
     }
 
     /// Preferred auth method used when (re)loading.
@@ -734,17 +814,23 @@ impl AuthManager {
     /// Force a reload using the existing preferred auth method. Returns
     /// whether the auth value changed.
     pub fn reload(&self) -> bool {
-        let preferred = self.preferred_auth_method();
-        let new_auth = CodexAuth::from_codex_home(&self.codex_home, preferred, &self.originator)
-            .ok()
-            .flatten();
-        if let Ok(mut guard) = self.inner.write() {
-            let changed = !AuthManager::auths_equal(&guard.auth, &new_auth);
-            guard.auth = new_auth;
-            changed
-        } else {
-            false
-        }
+        let openai_changed = {
+            let preferred = self.preferred_auth_method();
+            let new_auth = CodexAuth::from_codex_home(&self.codex_home, preferred, &self.originator)
+                .ok()
+                .flatten();
+            if let Ok(mut guard) = self.inner.write() {
+                let changed = !Self::auths_equal(&guard.auth, &new_auth);
+                guard.auth = new_auth;
+                changed
+            } else {
+                false
+            }
+        };
+
+        let claude_changed = self.reload_claude();
+        
+        openai_changed || claude_changed
     }
 
     fn auths_equal(a: &Option<CodexAuth>, b: &Option<CodexAuth>) -> bool {
@@ -752,6 +838,74 @@ impl AuthManager {
             (None, None) => true,
             (Some(a), Some(b)) => a == b,
             _ => false,
+        }
+    }
+
+    fn claude_auths_equal(a: &Option<ClaudeAuth>, b: &Option<ClaudeAuth>) -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                // Simple comparison based on mode and key/token availability
+                a.mode == b.mode && 
+                a.api_key == b.api_key
+                // Note: subscription_info comparison skipped for simplicity
+            }
+            _ => false,
+        }
+    }
+
+    /// Get the best authentication provider based on availability and subscription status
+    pub async fn get_optimal_provider(&self) -> Option<AuthProvider> {
+        // First, try Claude if available and has Max subscription
+        if let Some(claude_auth) = self.claude_auth() {
+            if claude_auth.has_max_subscription().await.unwrap_or(false) {
+                return Some(AuthProvider::Claude(claude_auth));
+            }
+        }
+
+        // Fall back to OpenAI if available
+        if let Some(openai_auth) = self.auth() {
+            return Some(AuthProvider::OpenAI(openai_auth));
+        }
+
+        // Finally, try Claude with any subscription level
+        if let Some(claude_auth) = self.claude_auth() {
+            return Some(AuthProvider::Claude(claude_auth));
+        }
+
+        None
+    }
+
+    /// Get specific provider if available
+    pub fn get_provider(&self, provider_type: ProviderType) -> Option<AuthProvider> {
+        match provider_type {
+            ProviderType::OpenAI => self.auth().map(AuthProvider::OpenAI),
+            ProviderType::Claude => self.claude_auth().map(AuthProvider::Claude),
+        }
+    }
+
+    /// Check if any authentication provider is available
+    pub fn has_any_auth(&self) -> bool {
+        self.auth().is_some() || self.claude_auth().is_some()
+    }
+
+    /// Reload Claude authentication
+    pub fn reload_claude(&self) -> bool {
+        let preferred = self.claude_inner
+            .read()
+            .map(|c| c.preferred_auth_mode)
+            .unwrap_or(ClaudeAuthMode::MaxSubscription);
+            
+        let new_auth = ClaudeAuth::from_codex_home(&self.codex_home, preferred, &self.originator)
+            .ok()
+            .flatten();
+            
+        if let Ok(mut guard) = self.claude_inner.write() {
+            let changed = !Self::claude_auths_equal(&guard.auth, &new_auth);
+            guard.auth = new_auth;
+            changed
+        } else {
+            false
         }
     }
 

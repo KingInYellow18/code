@@ -56,6 +56,10 @@ pub struct Agent {
     #[serde(skip)]
     #[allow(dead_code)]
     pub config: Option<AgentConfig>,
+    /// Claude authentication session ID for quota tracking
+    pub claude_session_id: Option<String>,
+    /// Whether this agent is using Claude authentication
+    pub uses_claude_auth: bool,
 }
 
 // Global agent manager
@@ -67,6 +71,8 @@ pub struct AgentManager {
     agents: HashMap<String, Agent>,
     handles: HashMap<String, JoinHandle<()>>,
     event_sender: Option<mpsc::UnboundedSender<Event>>,
+    /// Optional Claude authentication coordinator for quota management
+    claude_auth_coordinator: Option<Arc<crate::agent_auth::AgentAuthCoordinator>>,
 }
 
 impl AgentManager {
@@ -75,11 +81,17 @@ impl AgentManager {
             agents: HashMap::new(),
             handles: HashMap::new(),
             event_sender: None,
+            claude_auth_coordinator: None,
         }
     }
 
     pub fn set_event_sender(&mut self, sender: mpsc::UnboundedSender<Event>) {
         self.event_sender = Some(sender);
+    }
+
+    /// Set Claude authentication coordinator for quota management
+    pub fn set_claude_auth_coordinator(&mut self, coordinator: Arc<crate::agent_auth::AgentAuthCoordinator>) {
+        self.claude_auth_coordinator = Some(coordinator);
     }
 
     async fn send_agent_status_update(&self) {
@@ -205,6 +217,8 @@ impl AgentManager {
             worktree_path: None,
             branch_name: None,
             config: config.clone(),
+            claude_session_id: None,
+            uses_claude_auth: false,
         };
 
         self.agents.insert(agent_id.clone(), agent.clone());
@@ -212,10 +226,26 @@ impl AgentManager {
         // Send initial status update
         self.send_agent_status_update().await;
 
+        // Check if agent needs Claude authentication
+        let needs_claude_auth = agent.model.to_lowercase() == "claude";
+        let claude_session_id = if needs_claude_auth {
+            if let Some(ref _coordinator) = self.claude_auth_coordinator {
+                // Claude authentication setup would go here
+                // For now, use existing environment setup
+                // TODO: Implement Claude authentication coordinator integration
+                None
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Spawn async agent
         let agent_id_clone = agent_id.clone();
+        let claude_coordinator = self.claude_auth_coordinator.clone();
         let handle = tokio::spawn(async move {
-            execute_agent(agent_id_clone, config).await;
+            execute_agent(agent_id_clone, config, claude_coordinator, claude_session_id).await;
         });
 
         self.handles.insert(agent_id.clone(), handle);
@@ -273,6 +303,13 @@ impl AgentManager {
             if let Some(agent) = self.agents.get_mut(agent_id) {
                 agent.status = AgentStatus::Cancelled;
                 agent.completed_at = Some(Utc::now());
+                
+                // Release Claude authentication if used
+                if agent.uses_claude_auth {
+                    if let Some(ref coordinator) = self.claude_auth_coordinator {
+                        let _ = coordinator.release_agent_quota(agent_id).await;
+                    }
+                }
             }
             true
         } else {
@@ -327,6 +364,14 @@ impl AgentManager {
                 }
             }
             agent.completed_at = Some(Utc::now());
+            
+            // Release Claude authentication if used
+            if agent.uses_claude_auth {
+                if let Some(ref coordinator) = self.claude_auth_coordinator {
+                    let _ = coordinator.release_agent_quota(agent_id).await;
+                }
+            }
+            
             // Send status update event
             self.send_agent_status_update().await;
         }
@@ -410,7 +455,12 @@ fn generate_branch_id(model: &str, agent: &str) -> String {
 
 use crate::git_worktree::setup_worktree;
 
-async fn execute_agent(agent_id: String, config: Option<AgentConfig>) {
+async fn execute_agent(
+    agent_id: String, 
+    config: Option<AgentConfig>,
+    claude_coordinator: Option<Arc<crate::agent_auth::AgentAuthCoordinator>>,
+    claude_session_id: Option<String>,
+) {
     let mut manager = AGENT_MANAGER.write().await;
 
     // Get agent details
@@ -489,6 +539,8 @@ async fn execute_agent(agent_id: String, config: Option<AgentConfig>) {
                             false,
                             Some(worktree_path),
                             config.clone(),
+                            claude_coordinator.clone(),
+                            claude_session_id.clone(),
                         )
                         .await
                     }
@@ -503,7 +555,7 @@ async fn execute_agent(agent_id: String, config: Option<AgentConfig>) {
             "{}\n\n[Running in read-only mode - no modifications allowed]",
             full_prompt
         );
-        execute_model_with_permissions(&model, &full_prompt, true, None, config).await
+        execute_model_with_permissions(&model, &full_prompt, true, None, config, claude_coordinator, claude_session_id).await
     };
 
     // Update result
@@ -517,6 +569,8 @@ async fn execute_model_with_permissions(
     read_only: bool,
     working_dir: Option<PathBuf>,
     config: Option<AgentConfig>,
+    claude_coordinator: Option<Arc<crate::agent_auth::AgentAuthCoordinator>>,
+    claude_session_id: Option<String>,
 ) -> Result<String, String> {
     // Helper: cross‑platform check whether an executable is available in PATH.
     fn command_exists(cmd: &str) -> bool {
@@ -642,10 +696,20 @@ async fn execute_model_with_permissions(
             if let Some(ref e) = cfg.env { for (k, v) in e { env.insert(k.clone(), v.clone()); } }
         }
 
+        // Apply Claude authentication environment if available
+        if let (Some(coordinator), Some(session_id)) = (&claude_coordinator, &claude_session_id) {
+            if let Some(_quota) = coordinator.get_agent_quota(session_id).await {
+                // Overlay Claude authentication environment variables
+                // TODO: Claude environment variables would be injected here
+            }
+        }
+
         // Convenience: map common key names so external CLIs "just work".
         if let Some(google_key) = env.get("GOOGLE_API_KEY").cloned() {
             env.entry("GEMINI_API_KEY".to_string()).or_insert(google_key);
         }
+        
+        // Enhanced Claude/Anthropic API key mapping with unified auth support
         if let Some(claude_key) = env.get("CLAUDE_API_KEY").cloned() {
             env.entry("ANTHROPIC_API_KEY".to_string()).or_insert(claude_key);
         }
@@ -654,6 +718,41 @@ async fn execute_model_with_permissions(
         }
         if let Some(anthropic_base) = env.get("ANTHROPIC_BASE_URL").cloned() {
             env.entry("CLAUDE_BASE_URL".to_string()).or_insert(anthropic_base);
+        }
+        
+        // Try to inject Claude authentication from unified auth system if available
+        // This allows agents to use Claude even when not explicitly configured
+        if !env.contains_key("ANTHROPIC_API_KEY") && !env.contains_key("CLAUDE_API_KEY") {
+            if let Ok(codex_home) = std::env::var("CODEX_HOME").or_else(|_| {
+                dirs::home_dir()
+                    .map(|h| h.join(".codex").to_string_lossy().to_string())
+                    .ok_or_else(|| std::env::VarError::NotPresent)
+            }) {
+                let codex_home_path = std::path::PathBuf::from(codex_home);
+                let claude_auth_file = crate::claude_auth::get_claude_auth_file(&codex_home_path);
+                
+                // Try to read Claude API key from auth file
+                if claude_auth_file.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&claude_auth_file) {
+                        if let Ok(auth_data) = serde_json::from_str::<crate::claude_auth::ClaudeAuthJson>(&content) {
+                            if let Some(api_key) = auth_data.api_key {
+                                env.insert("ANTHROPIC_API_KEY".to_string(), api_key.clone());
+                                env.insert("CLAUDE_API_KEY".to_string(), api_key);
+                                env.insert("CLAUDE_AUTH_SOURCE".to_string(), "codex_unified_auth".to_string());
+                            }
+                        }
+                    }
+                }
+                
+                // Also check for environment variable fallback
+                if !env.contains_key("ANTHROPIC_API_KEY") {
+                    if let Some(claude_key) = crate::claude_auth::read_claude_api_key_from_env() {
+                        env.insert("ANTHROPIC_API_KEY".to_string(), claude_key.clone());
+                        env.insert("CLAUDE_API_KEY".to_string(), claude_key);
+                        env.insert("CLAUDE_AUTH_SOURCE".to_string(), "environment".to_string());
+                    }
+                }
+            }
         }
         // Reduce startup overhead for Claude CLI: disable auto-updater/telemetry.
         env.entry("DISABLE_AUTOUPDATER".to_string()).or_insert("1".to_string());
@@ -769,6 +868,13 @@ async fn execute_model_with_permissions(
                     fb.args(["-s", "read-only", "-a", "never", "exec", "--skip-git-repo-check", prompt]);
                 } else {
                     fb.args(["-s", "workspace-write", "-a", "never", "exec", "--skip-git-repo-check", prompt]);
+                }
+                
+                // Apply Claude authentication environment for fallback too
+                if let (Some(coordinator), Some(session_id)) = (&claude_coordinator, &claude_session_id) {
+                    if let Some(_quota) = coordinator.get_agent_quota(session_id).await {
+                        // TODO: Claude environment variables would be injected here
+                    }
                 }
                 fb.output().await.map_err(|e2| {
                     format!(

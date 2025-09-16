@@ -35,12 +35,67 @@ use tracing::trace;
 use tracing::warn;
 use uuid::Uuid;
 use crate::CodexAuth;
+use crate::agent_tool::AgentStatusUpdatePayload;
 use crate::protocol::WebSearchBeginEvent;
 use crate::protocol::WebSearchCompleteEvent;
 use codex_protocol::models::WebSearchAction;
 
 /// Initial submission ID for session configuration
 pub(crate) const INITIAL_SUBMIT_ID: &str = "";
+
+#[derive(Clone, Default)]
+struct ConfirmGuardRuntime {
+    patterns: Vec<ConfirmGuardPatternRuntime>,
+}
+
+#[derive(Clone)]
+struct ConfirmGuardPatternRuntime {
+    regex: regex_lite::Regex,
+    message: Option<String>,
+    raw: String,
+}
+
+impl ConfirmGuardRuntime {
+    fn from_config(config: &crate::config_types::ConfirmGuardConfig) -> Self {
+        let mut patterns = Vec::new();
+        for pattern in &config.patterns {
+            match regex_lite::Regex::new(&pattern.regex) {
+                Ok(regex) => patterns.push(ConfirmGuardPatternRuntime {
+                    regex,
+                    message: pattern.message.clone(),
+                    raw: pattern.regex.clone(),
+                }),
+                Err(err) => {
+                    tracing::warn!("Skipping confirm guard pattern `{}`: {err}", pattern.regex);
+                }
+            }
+        }
+        Self { patterns }
+    }
+
+    fn matched_pattern(&self, input: &str) -> Option<&ConfirmGuardPatternRuntime> {
+        self.patterns.iter().find(|pat| pat.regex.is_match(input))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+}
+
+impl ConfirmGuardPatternRuntime {
+    fn guidance(&self, original_label: &str, original_value: &str, suggested: &str) -> String {
+        let header = self
+            .message
+            .clone()
+            .unwrap_or_else(|| {
+                format!(
+                    "Blocked command matching confirm guard pattern `{}`. Resend with 'confirm:' if you intend to proceed.",
+                    self.raw
+                )
+            });
+        format!("{header}\n\n{original_label}: {original_value}\nresend_exact_argv: {suggested}")
+    }
+}
 
 /// Gather ephemeral, per-turn context that should not be persisted to history.
 /// Combines environment info and (when enabled) a live browser snapshot and status.
@@ -161,6 +216,25 @@ fn get_git_branch(cwd: &std::path::Path) -> Option<String> {
         }
     }
     None
+}
+
+fn maybe_update_from_model_info<T: Copy + PartialEq>(
+    field: &mut Option<T>,
+    old_default: Option<T>,
+    new_default: Option<T>,
+) {
+    if field.is_none() {
+        if let Some(new_val) = new_default {
+            *field = Some(new_val);
+        }
+        return;
+    }
+
+    if let (Some(current), Some(old_val)) = (*field, old_default) {
+        if current == old_val {
+            *field = new_default;
+        }
+    }
 }
 
 async fn build_turn_status_items(sess: &Session) -> Vec<ResponseItem> {
@@ -352,7 +426,7 @@ use crate::client::ModelClient;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::environment_context::EnvironmentContext;
-use crate::config::Config;
+use crate::config::{persist_model_selection, Config};
 use crate::config_types::ShellEnvironmentPolicy;
 use crate::conversation_history::ConversationHistory;
 use crate::error::CodexErr;
@@ -368,6 +442,7 @@ use crate::exec::process_exec_tool_call;
 use crate::exec_env::create_env;
 use crate::mcp_connection_manager::McpConnectionManager;
 use crate::mcp_tool_call::handle_mcp_tool_call;
+use crate::model_family::{derive_default_model_family, find_family_for_model};
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::LocalShellAction;
@@ -376,6 +451,7 @@ use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::ShellToolCallParams;
+use crate::openai_model_info::get_model_info;
 use crate::openai_tools::ToolsConfig;
 use crate::openai_tools::get_openai_tools;
 use crate::parse_command::parse_command;
@@ -418,6 +494,7 @@ use crate::shell;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use crate::user_notification::UserNotification;
 use crate::util::backoff;
+use crate::rollout::recorder::SessionStateSnapshot;
 use serde_json::Value;
 use crate::exec_command::ExecSessionManager;
 
@@ -601,6 +678,7 @@ pub(crate) struct Session {
     last_system_status: Mutex<Option<String>>,
     /// Track the last screenshot path and hash to detect changes
     last_screenshot_info: Mutex<Option<(PathBuf, Vec<u8>, Vec<u8>)>>, // (path, phash, dhash)
+    confirm_guard: ConfirmGuardRuntime,
 }
 
 #[derive(Debug, Clone)]
@@ -744,7 +822,7 @@ impl Session {
     }
 
     /// Create a stamped Event with a per-turn sequence number.
-    fn make_event(&self, sub_id: &str, msg: EventMsg) -> Event {
+    pub(crate) fn make_event(&self, sub_id: &str, msg: EventMsg) -> Event {
         let mut state = self.state.lock().unwrap();
         let seq = match msg {
             EventMsg::TaskStarted => {
@@ -1013,7 +1091,7 @@ impl Session {
     }
 
     async fn record_state_snapshot(&self, items: &[ResponseItem]) {
-        let snapshot = { crate::rollout::SessionStateSnapshot {} };
+        let snapshot = { SessionStateSnapshot {} };
 
         let recorder = {
             let guard = self.rollout.lock().unwrap();
@@ -1087,6 +1165,7 @@ impl Session {
             aggregated_output: _,
             duration,
             exit_code,
+            timed_out: _,
         } = output;
         // Because stdout and stderr could each be up to 100 KiB, we send
         // truncated versions.
@@ -1158,6 +1237,7 @@ impl Session {
         let output_stderr;
         let borrowed: &ExecToolCallOutput = match &result {
             Ok(output) => output,
+            Err(CodexErr::Sandbox(SandboxErr::Timeout { output })) => output,
             Err(e) => {
                 output_stderr = ExecToolCallOutput {
                     exit_code: -1,
@@ -1165,6 +1245,7 @@ impl Session {
                     stderr: StreamOutput::new(get_error_message_ui(e)),
                     aggregated_output: StreamOutput::new(get_error_message_ui(e)),
                     duration: Duration::default(),
+                    timed_out: false,
                 };
                 &output_stderr
             }
@@ -1510,6 +1591,7 @@ async fn submission_loop(
     rx_sub: Receiver<Submission>,
     tx_event: Sender<Event>,
 ) {
+    let mut config = config;
     let mut sess: Option<Arc<Session>> = None;
     let mut agent_manager_initialized = false;
     // shorthand - send an event when there is no active session
@@ -1565,6 +1647,77 @@ async fn submission_loop(
                     }
                     return;
                 }
+                let current_config = Arc::clone(&config);
+                let mut updated_config = (*current_config).clone();
+
+                let model_changed = !updated_config.model.eq_ignore_ascii_case(&model);
+                let effort_changed = updated_config.model_reasoning_effort != model_reasoning_effort;
+
+                let old_model_family = updated_config.model_family.clone();
+                let old_model_info = get_model_info(&old_model_family);
+
+                updated_config.model = model.clone();
+                updated_config.model_provider = provider.clone();
+                updated_config.model_reasoning_effort = model_reasoning_effort;
+                updated_config.model_reasoning_summary = model_reasoning_summary;
+                updated_config.model_text_verbosity = model_text_verbosity;
+                updated_config.user_instructions = user_instructions.clone();
+                updated_config.base_instructions = base_instructions.clone();
+                updated_config.approval_policy = approval_policy;
+                updated_config.sandbox_policy = sandbox_policy.clone();
+                updated_config.disable_response_storage = disable_response_storage;
+                updated_config.notify = notify.clone();
+                updated_config.cwd = cwd.clone();
+
+                updated_config.model_family = find_family_for_model(&updated_config.model)
+                    .unwrap_or_else(|| derive_default_model_family(&updated_config.model));
+
+                let new_model_info = get_model_info(&updated_config.model_family);
+
+                let old_context_window = old_model_info.as_ref().map(|info| info.context_window);
+                let new_context_window = new_model_info.as_ref().map(|info| info.context_window);
+                let old_max_tokens = old_model_info.as_ref().map(|info| info.max_output_tokens);
+                let new_max_tokens = new_model_info.as_ref().map(|info| info.max_output_tokens);
+                let old_auto_compact = old_model_info
+                    .as_ref()
+                    .and_then(|info| info.auto_compact_token_limit);
+                let new_auto_compact = new_model_info
+                    .as_ref()
+                    .and_then(|info| info.auto_compact_token_limit);
+
+                maybe_update_from_model_info(
+                    &mut updated_config.model_context_window,
+                    old_context_window,
+                    new_context_window,
+                );
+                maybe_update_from_model_info(
+                    &mut updated_config.model_max_output_tokens,
+                    old_max_tokens,
+                    new_max_tokens,
+                );
+                maybe_update_from_model_info(
+                    &mut updated_config.model_auto_compact_token_limit,
+                    old_auto_compact,
+                    new_auto_compact,
+                );
+
+                let new_config = Arc::new(updated_config);
+
+                if model_changed || effort_changed {
+                    if let Err(err) = persist_model_selection(
+                        &new_config.codex_home,
+                        new_config.active_profile.as_deref(),
+                        &new_config.model,
+                        Some(new_config.model_reasoning_effort),
+                    )
+                    .await
+                    {
+                        warn!("failed to persist model selection: {err:#}");
+                    }
+                }
+
+                config = Arc::clone(&new_config);
+
                 // Optionally resume an existing rollout.
                 let mut restored_items: Option<Vec<ResponseItem>> = None;
                 let rollout_recorder: Option<RolloutRecorder> =
@@ -1649,14 +1802,14 @@ async fn submission_loop(
                 let writable_roots = get_writable_roots(&cwd);
 
                 // Error messages to dispatch after SessionConfigured is sent.
-                let mut mcp_connection_errors = Vec::<Event>::new();
+                let mut mcp_connection_errors = Vec::<String>::new();
                 let (mcp_connection_manager, failed_clients) =
                     match McpConnectionManager::new(config.mcp_servers.clone()).await {
                         Ok((mgr, failures)) => (mgr, failures),
                         Err(e) => {
                             let message = format!("Failed to create MCP connection manager: {e:#}");
                             error!("{message}");
-                            mcp_connection_errors.push(Event { id: sub.id.clone(), event_seq: 0, msg: EventMsg::Error(ErrorEvent { message }), order: None });
+                            mcp_connection_errors.push(message);
                             (McpConnectionManager::default(), Default::default())
                         }
                     };
@@ -1667,7 +1820,7 @@ async fn submission_loop(
                         let message =
                             format!("MCP client for `{server_name}` failed to start: {err:#}");
                         error!("{message}");
-                        mcp_connection_errors.push(Event { id: sub.id.clone(), event_seq: 0, msg: EventMsg::Error(ErrorEvent { message }), order: None });
+                        mcp_connection_errors.push(message);
                     }
                 }
                 let default_shell = shell::default_user_shell().await;
@@ -1708,6 +1861,7 @@ async fn submission_loop(
                     pending_browser_screenshots: Mutex::new(Vec::new()),
                     last_system_status: Mutex::new(None),
                     last_screenshot_info: Mutex::new(None),
+                    confirm_guard: ConfirmGuardRuntime::from_config(&config.confirm_guard),
                 }));
 
                 // Patch restored state into the newly created session.
@@ -1723,18 +1877,19 @@ async fn submission_loop(
                     crate::message_history::history_metadata(&config).await;
 
                 // ack
-                let events = std::iter::once(Event {
-                    id: INITIAL_SUBMIT_ID.to_string(),
-                    event_seq: 0,
-                    msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+                let sess_arc = sess.as_ref().expect("session initialized");
+                let events = std::iter::once(sess_arc.make_event(
+                    INITIAL_SUBMIT_ID,
+                    EventMsg::SessionConfigured(SessionConfiguredEvent {
                         session_id,
                         model,
                         history_log_id,
                         history_entry_count,
                     }),
-                    order: None,
-                })
-                .chain(mcp_connection_errors.into_iter());
+                ))
+                .chain(mcp_connection_errors.into_iter().map(|message| {
+                    sess_arc.make_event(&sub.id, EventMsg::Error(ErrorEvent { message }))
+                }));
                 for event in events {
                     if let Err(e) = tx_event.send(event).await {
                         error!("failed to send event: {e:?}");
@@ -1742,7 +1897,10 @@ async fn submission_loop(
                 }
                 // If we resumed from a rollout, replay the prior transcript into the UI.
                 if let Some(items) = restored_items {
-                    let event = Event { id: sub.id.clone(), event_seq: 0, msg: EventMsg::ReplayHistory(crate::protocol::ReplayHistoryEvent { items }), order: None };
+                    let event = sess_arc.make_event(
+                        &sub.id,
+                        EventMsg::ReplayHistory(crate::protocol::ReplayHistoryEvent { items }),
+                    );
                     if let Err(e) = tx_event.send(event).await {
                         warn!("failed to send ReplayHistory event: {e}");
                     }
@@ -1751,14 +1909,24 @@ async fn submission_loop(
                 // Initialize agent manager after SessionConfigured is sent
                 if !agent_manager_initialized {
                     let mut manager = AGENT_MANAGER.write().await;
-                    let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let (agent_tx, mut agent_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<AgentStatusUpdatePayload>();
                     manager.set_event_sender(agent_tx);
                     drop(manager);
 
+                    let sess_for_agents = sess.as_ref().expect("session active").clone();
                     // Forward agent events to the main event channel
                     let tx_event_clone = tx_event.clone();
                     tokio::spawn(async move {
-                        while let Some(event) = agent_rx.recv().await {
+                        while let Some(payload) = agent_rx.recv().await {
+                            let event = sess_for_agents.make_event(
+                                "agent_status",
+                                EventMsg::AgentStatusUpdate(AgentStatusUpdateEvent {
+                                    agents: payload.agents.clone(),
+                                    context: payload.context.clone(),
+                                    task: payload.task.clone(),
+                                }),
+                            );
                             let _ = tx_event_clone.send(event).await;
                         }
                     });
@@ -1897,19 +2065,32 @@ async fn submission_loop(
 
                 // Gracefully flush and shutdown rollout recorder on session end so tests
                 // that inspect the rollout file do not race with the background writer.
-                if let Some(sess_arc) = sess {
+                if let Some(ref sess_arc) = sess {
                     let recorder_opt = sess_arc.rollout.lock().unwrap().take();
                     if let Some(rec) = recorder_opt {
                         if let Err(e) = rec.shutdown().await {
                             warn!("failed to shutdown rollout recorder: {e}");
-                            let event = Event { id: sub.id.clone(), event_seq: 0, msg: EventMsg::Error(ErrorEvent { message: "Failed to shutdown rollout recorder".to_string() }), order: None };
+                            let event = sess_arc.make_event(
+                                &sub.id,
+                                EventMsg::Error(ErrorEvent {
+                                    message: "Failed to shutdown rollout recorder".to_string(),
+                                }),
+                            );
                             if let Err(e) = tx_event.send(event).await {
                                 warn!("failed to send error message: {e:?}");
                             }
                         }
                     }
                 }
-                let event = Event { id: sub.id.clone(), event_seq: 0, msg: EventMsg::ShutdownComplete, order: None };
+                let event = match sess {
+                    Some(ref sess_arc) => sess_arc.make_event(&sub.id, EventMsg::ShutdownComplete),
+                    None => Event {
+                        id: sub.id.clone(),
+                        event_seq: 0,
+                        msg: EventMsg::ShutdownComplete,
+                        order: None,
+                    },
+                };
                 if let Err(e) = tx_event.send(event).await {
                     warn!("failed to send Shutdown event: {e}");
                 }
@@ -2134,7 +2315,10 @@ async fn run_agent(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
             }
             Err(e) => {
                 info!("Turn error: {e:#}");
-                let event = Event { id: sub_id.clone(), event_seq: 0, msg: EventMsg::Error(ErrorEvent { message: e.to_string() }), order: None };
+                let event = sess.make_event(
+                    &sub_id,
+                    EventMsg::Error(ErrorEvent { message: e.to_string() }),
+                );
                 sess.tx_event.send(event).await.ok();
                 // let the user continue the conversation
                 break;
@@ -2142,7 +2326,12 @@ async fn run_agent(sess: Arc<Session>, sub_id: String, input: Vec<InputItem>) {
         }
     }
     sess.remove_agent(&sub_id);
-    let event = Event { id: sub_id, event_seq: 0, msg: EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message: last_task_message }), order: None };
+    let event = sess.make_event(
+        &sub_id,
+        EventMsg::TaskComplete(TaskCompleteEvent {
+            last_agent_message: last_task_message,
+        }),
+    );
     match &event.msg {
         EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message: Some(m) }) => {
             tracing::info!("core.emit TaskComplete last_agent_message.len={}", m.len());
@@ -2681,10 +2870,16 @@ async fn run_compact_agent(
                     tokio::time::sleep(delay).await;
                     continue;
                 } else {
-                    let event = Event { id: sub_id.clone(), event_seq: 0, msg: EventMsg::Error(ErrorEvent { message: e.to_string() }), order: None };
+                    let event = sess.make_event(
+                        &sub_id,
+                        EventMsg::Error(ErrorEvent { message: e.to_string() }),
+                    );
                     sess.send_event(event).await;
                     // Ensure the UI is released from running state even on errors.
-                    let done = Event { id: sub_id.clone(), event_seq: 0, msg: EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message: None }), order: None };
+                    let done = sess.make_event(
+                        &sub_id,
+                        EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message: None }),
+                    );
                     sess.send_event(done).await;
                     return;
                 }
@@ -2693,7 +2888,12 @@ async fn run_compact_agent(
     }
 
     sess.remove_agent(&sub_id);
-    let event = Event { id: sub_id.clone(), event_seq: 0, msg: EventMsg::AgentMessage(AgentMessageEvent { message: "Compact agent completed".to_string() }), order: None };
+    let event = sess.make_event(
+        &sub_id,
+        EventMsg::AgentMessage(AgentMessageEvent {
+            message: "Compact agent completed".to_string(),
+        }),
+    );
     sess.send_event(event).await;
     let event = sess.make_event(
         &sub_id,
@@ -3941,6 +4141,7 @@ async fn handle_run_agent(sess: &Session, ctx: &ToolCallCtx, arguments: String) 
                     // External CLIs expected to be in PATH
                     "claude" => ("claude".to_string(), false),
                     "gemini" => ("gemini".to_string(), false),
+                    "qwen" => ("qwen".to_string(), false),
                     _ => (m, false),
                 }
             }
@@ -4651,7 +4852,10 @@ async fn handle_list_agents(sess: &Session, ctx: &ToolCallCtx, arguments: String
                     running_count,
                     if running_count != 1 { "s" } else { "" }
                 );
-    let event = Event { id: "agent-status".to_string(), event_seq: 0, msg: EventMsg::BackgroundEvent(BackgroundEventEvent { message: status_msg }), order: None };
+                let event = sess.make_event(
+                    "agent-status",
+                    EventMsg::BackgroundEvent(BackgroundEventEvent { message: status_msg }),
+                );
                 let _ = sess.tx_event.send(event).await;
             }
 
@@ -4729,7 +4933,7 @@ async fn handle_container_exec_with_params(
     output_index: Option<u32>,
     attempt_req: u64,
 ) -> ResponseInputItem {
-    // Intercept risky git branch-changing commands and require an explicit confirm prefix.
+    // Intercept risky git commands and require an explicit confirm prefix.
     // We support a simple convention: prefix the script with `confirm:` to proceed.
     // The prefix is stripped before execution.
     fn extract_shell_script_from_wrapper(argv: &[String]) -> Option<(usize, String)> {
@@ -4748,12 +4952,21 @@ async fn handle_container_exec_with_params(
         None
     }
 
-    fn looks_like_branch_change(script: &str) -> bool {
-        // Goal: detect branch-changing git invocations while avoiding false
-        // positives from commit messages or other quoted strings. We do a
-        // lightweight scan that strips quoted regions before token analysis.
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    enum SensitiveGitKind {
+        BranchChange,
+        PathCheckout,
+        Reset,
+        Revert,
+    }
 
-        // 1) Strip single- and double-quoted segments (keep length with spaces).
+    fn detect_sensitive_git(script: &str) -> Option<SensitiveGitKind> {
+        // Goal: detect sensitive git invocations (branch changes, resets) while
+        // avoiding false positives from commit messages or other quoted strings.
+        // We do a lightweight scan that strips quoted regions before token analysis.
+
+        // 1) Strip quote characters but preserve content inside quotes, while
+        // neutralizing control separators to avoid over-splitting tokens.
         let mut cleaned = String::with_capacity(script.len());
         let mut in_squote = false;
         let mut in_dquote = false;
@@ -4767,20 +4980,28 @@ async fn handle_container_exec_with_params(
                 }
                 '\'' if !in_dquote => {
                     in_squote = !in_squote;
-                    emit_space = true;
+                    emit_space = true; // token boundary at quote edges
                     prev_was_backslash = false;
                 }
                 '"' if !in_squote && !prev_was_backslash => {
                     in_dquote = !in_dquote;
-                    emit_space = true;
+                    emit_space = true; // token boundary at quote edges
                     prev_was_backslash = false;
                 }
                 _ => {
                     prev_was_backslash = false;
                 }
             }
-            if in_squote || in_dquote || emit_space {
+            if emit_space {
                 cleaned.push(' ');
+                continue;
+            }
+            if in_squote || in_dquote {
+                if matches!(ch, '|' | '&' | ';' | '\n' | '\r') {
+                    cleaned.push(' ');
+                } else {
+                    cleaned.push(ch);
+                }
             } else {
                 cleaned.push(ch);
             }
@@ -4792,61 +5013,108 @@ async fn handle_container_exec_with_params(
             for part in chunk.split(|c| matches!(c, '|' | '&')) {
                 let s = part.trim();
                 if s.is_empty() { continue; }
-                // Tokenize on whitespace.
-                let mut it = s.split_whitespace();
-                // Skip leading env assignments (FOO=bar) and `env`.
-                let mut first = None;
-                while let Some(tok) = it.next() {
+                // Tokenize on whitespace, skip wrappers and git globals to find the real subcommand.
+                let raw_tokens: Vec<&str> = s.split_whitespace().collect();
+                if raw_tokens.is_empty() { continue; }
+                fn strip_tok(t: &str) -> &str { t.trim_matches(|c| matches!(c, '(' | ')' | '{' | '}' | '\'' | '"')) }
+                let mut i = 0usize;
+                // Skip env assignments and lightweight wrappers/keywords.
+                loop {
+                    if i >= raw_tokens.len() { break; }
+                    let tok = strip_tok(raw_tokens[i]);
+                    if tok.is_empty() { i += 1; continue; }
+                    // Skip KEY=val assignments.
                     if tok.contains('=') && !tok.starts_with('=') && !tok.starts_with('-') {
+                        i += 1; continue;
+                    }
+                    // Skip simple wrappers and control keywords.
+                    if matches!(tok, "env" | "sudo" | "command" | "time" | "nohup" | "nice" | "then" | "do" | "{" | "(") {
+                        // Best-effort: skip immediate option-like flags after some wrappers.
+                        i += 1;
+                        while i < raw_tokens.len() {
+                            let peek = strip_tok(raw_tokens[i]);
+                            if peek.starts_with('-') { i += 1; } else { break; }
+                        }
                         continue;
                     }
-                    if tok == "env" { continue; }
-                    first = Some(tok);
                     break;
                 }
-                let Some(cmd) = first else { continue };
-                // Identify `git` executable (allow path prefixes).
+                if i >= raw_tokens.len() { continue; }
+                let cmd = strip_tok(raw_tokens[i]);
                 let is_git = cmd.ends_with("/git") || cmd == "git";
                 if !is_git { continue; }
-                // Next token is the subcommand.
-                let Some(sub) = it.next() else { continue; };
+                i += 1; // advance past git
+                // Skip git global options to find the real subcommand.
+                while i < raw_tokens.len() {
+                    let t = strip_tok(raw_tokens[i]);
+                    if t.is_empty() { i += 1; continue; }
+                    if matches!(t, "-C" | "--git-dir" | "--work-tree" | "-c") {
+                        i += 1; // skip option key
+                        if i < raw_tokens.len() { i += 1; } // skip its value
+                        continue;
+                    }
+                    if t.starts_with("--git-dir=") || t.starts_with("--work-tree=") || t.starts_with("-c") {
+                        i += 1; continue;
+                    }
+                    if t.starts_with('-') { i += 1; continue; }
+                    break;
+                }
+                if i >= raw_tokens.len() { continue; }
+                let sub = strip_tok(raw_tokens[i]);
+                i += 1;
                 match sub {
                     "checkout" => {
+                        let args: Vec<&str> = raw_tokens[i..].iter().map(|t| strip_tok(t)).collect();
+                        let has_path_delimiter = args.iter().any(|a| *a == "--");
+                        if has_path_delimiter {
+                            return Some(SensitiveGitKind::PathCheckout);
+                        }
+
                         // If any of the strong branch-changing flags are present, flag it.
                         let mut saw_branch_change_flag = false;
-                        let mut args: Vec<&str> = Vec::new();
-                        for a in it.clone() { args.push(a); }
                         for a in &args {
                             if matches!(*a, "-b" | "-B" | "--orphan" | "--detach") {
                                 saw_branch_change_flag = true;
                                 break;
                             }
                         }
-                        if saw_branch_change_flag { return true; }
-                        // If `--` is present, this is a path checkout, not branch.
-                        if args.iter().any(|a| *a == "--") { continue; }
+                        if saw_branch_change_flag { return Some(SensitiveGitKind::BranchChange); }
+
+                        // `git checkout -` switches to previous branch.
+                        if args.first().copied() == Some("-") {
+                            return Some(SensitiveGitKind::BranchChange);
+                        }
+
                         // Heuristic: a single non-flag argument likely denotes a branch.
-                        // To reduce false positives (e.g. `git checkout .`), only flag
-                        // when the first arg does not start with '-' and is not a solitary '.' or '..'.
                         if let Some(first_arg) = args.first() {
                             let a = *first_arg;
                             if !a.starts_with('-') && a != "." && a != ".." {
-                                return true;
+                                return Some(SensitiveGitKind::BranchChange);
                             }
                         }
                     }
                     "switch" => {
                         // `git switch -c <name>` creates; `git switch <name>` changes.
-                        let mut args = it;
                         let mut saw_c = false;
+                        let mut saw_detach = false;
                         let mut first_non_flag: Option<&str> = None;
-                        while let Some(a) = args.next() {
+                        for a in &raw_tokens[i..] {
+                            let a = strip_tok(a);
                             if a == "-c" { saw_c = true; break; }
+                            if a == "--detach" { saw_detach = true; break; }
                             if a.starts_with('-') { continue; }
                             first_non_flag = Some(a);
                             break;
                         }
-                        if saw_c || first_non_flag.is_some() { return true; }
+                        if saw_c || saw_detach || first_non_flag.is_some() { return Some(SensitiveGitKind::BranchChange); }
+                    }
+                    "reset" => {
+                        // Any form of git reset is considered sensitive.
+                        return Some(SensitiveGitKind::Reset);
+                    }
+                    "revert" => {
+                        // Any form of git revert is considered sensitive.
+                        return Some(SensitiveGitKind::Revert);
                     }
                     // Future: consider `git branch -D/-m` as branch‑modifying, but keep
                     // this minimal to avoid over‑blocking normal workflows.
@@ -4854,7 +5122,36 @@ async fn handle_container_exec_with_params(
                 }
             }
         }
-        false
+        None
+    }
+
+    fn guidance_for_sensitive_git(kind: SensitiveGitKind, original_label: &str, original_value: &str, suggested: &str) -> String {
+        match kind {
+            SensitiveGitKind::BranchChange => format!(
+                "Blocked git checkout/switch on a branch. Switching branches can discard or hide in-progress changes. Only continue if the user explicitly requested this branch change. Resend with 'confirm:' if you intend to proceed.\n\n{}: {}\nresend_exact_argv: {}",
+                original_label,
+                original_value,
+                suggested
+            ),
+            SensitiveGitKind::PathCheckout => format!(
+                "Blocked git checkout -- <paths>. This command overwrites local modifications to the specified files. If you intentionally want to discard those edits, resend the exact command prefixed with 'confirm:'.\n\n{}: {}\nresend_exact_argv: {}",
+                original_label,
+                original_value,
+                suggested
+            ),
+            SensitiveGitKind::Reset => format!(
+                "Blocked git reset. Reset rewrites the working tree/index and may delete local work. If backups exist and this was explicitly requested, resend prefixed with 'confirm:'.\n\n{}: {}\nresend_exact_argv: {}",
+                original_label,
+                original_value,
+                suggested
+            ),
+            SensitiveGitKind::Revert => format!(
+                "Blocked git revert. Reverting commits alters history and should only happen when the user asks for it. If that’s the case, resend the command with 'confirm:'.\n\n{}: {}\nresend_exact_argv: {}",
+                original_label,
+                original_value,
+                suggested
+            ),
+        }
     }
 
     // If the argv is a shell wrapper, analyze and optionally strip `confirm:`.
@@ -4867,22 +5164,47 @@ async fn handle_container_exec_with_params(
             .iter()
             .any(|p| trimmed.starts_with(p));
 
-        // If no confirm prefix and it looks like a branch change, reject with guidance.
-        if !has_confirm_prefix && looks_like_branch_change(trimmed) {
-            // Provide the exact argv the model should resend with the confirm prefix.
-            let mut argv_confirm = params.command.clone();
-            argv_confirm[script_index] = format!("confirm: {}", script.trim_start());
-            let suggested = serde_json::to_string(&argv_confirm)
-                .unwrap_or_else(|_| "<failed to serialize suggested argv>".to_string());
-            let guidance = format!(
-                "blocked potentially destructive git branch change. Git branching should only be performed when explicitly requested by the user. To proceed, resend the shell call with a confirmation prefix to indicate it was explicitly requested. Please use 'confirm:' to confirm it was requested.\n\noriginal_script: {}\nresend_exact_argv: {}",
-                script,
-                suggested
-            );
-            return ResponseInputItem::FunctionCallOutput {
-                call_id,
-                output: FunctionCallOutputPayload { content: guidance, success: None },
-            };
+        // If no confirm prefix and it looks like a sensitive git command, reject with guidance.
+        if !has_confirm_prefix {
+            if let Some(pattern) = if sess.confirm_guard.is_empty() {
+                None
+            } else {
+                sess.confirm_guard.matched_pattern(trimmed)
+            } {
+                let mut argv_confirm = params.command.clone();
+                argv_confirm[script_index] = format!("confirm: {}", script.trim_start());
+                let suggested = serde_json::to_string(&argv_confirm)
+                    .unwrap_or_else(|_| "<failed to serialize suggested argv>".to_string());
+                let guidance = pattern.guidance("original_script", &script, &suggested);
+
+                sess
+                    .notify_background_event(&sub_id, format!("Command guard: {}", guidance))
+                    .await;
+
+                return ResponseInputItem::FunctionCallOutput {
+                    call_id,
+                    output: FunctionCallOutputPayload { content: guidance, success: None },
+                };
+            }
+
+            if let Some(kind) = detect_sensitive_git(trimmed) {
+                // Provide the exact argv the model should resend with the confirm prefix.
+                let mut argv_confirm = params.command.clone();
+                argv_confirm[script_index] = format!("confirm: {}", script.trim_start());
+                let suggested = serde_json::to_string(&argv_confirm)
+                    .unwrap_or_else(|_| "<failed to serialize suggested argv>".to_string());
+
+                let guidance = guidance_for_sensitive_git(kind, "original_script", &script, &suggested);
+
+                sess
+                    .notify_background_event(&sub_id, format!("Command guard: {}", guidance.clone()))
+                    .await;
+
+                return ResponseInputItem::FunctionCallOutput {
+                    call_id,
+                    output: FunctionCallOutputPayload { content: guidance, success: None },
+                };
+            }
         }
 
         // If confirm prefix present, strip it before execution.
@@ -5038,6 +5360,111 @@ async fn handle_container_exec_with_params(
             }
         }
     }
+
+    // If no shell wrapper, perform a lightweight argv inspection for sensitive git commands.
+    if extract_shell_script_from_wrapper(&params.command).is_none() {
+        if !sess.confirm_guard.is_empty() {
+            let joined = params.command.join(" ");
+            if let Some(pattern) = sess.confirm_guard.matched_pattern(&joined) {
+                let suggested = serde_json::to_string(&vec![
+                    "bash".to_string(),
+                    "-lc".to_string(),
+                    format!("confirm: {}", joined),
+                ])
+                .unwrap_or_else(|_| "<failed to serialize suggested argv>".to_string());
+                let guidance = pattern.guidance(
+                    "original_argv",
+                    &format!("{:?}", params.command),
+                    &suggested,
+                );
+
+                sess
+                    .notify_background_event(&sub_id, format!("Command guard: {}", guidance.clone()))
+                    .await;
+
+                return ResponseInputItem::FunctionCallOutput {
+                    call_id,
+                    output: FunctionCallOutputPayload { content: guidance, success: None },
+                };
+            }
+        }
+
+        fn strip_tok2(t: &str) -> &str { t.trim_matches(|c| matches!(c, '(' | ')' | '{' | '}' | '\'' | '"')) }
+        let mut i = 0usize;
+        // Skip env assignments and simple wrappers at the front
+        while i < params.command.len() {
+            let tok = strip_tok2(&params.command[i]);
+            if tok.is_empty() { i += 1; continue; }
+            if tok.contains('=') && !tok.starts_with('=') && !tok.starts_with('-') { i += 1; continue; }
+            if matches!(tok, "env" | "sudo" | "command" | "time" | "nohup" | "nice") {
+                i += 1;
+                while i < params.command.len() && strip_tok2(&params.command[i]).starts_with('-') { i += 1; }
+                continue;
+            }
+            break;
+        }
+        if i < params.command.len() {
+            let cmd = strip_tok2(&params.command[i]);
+            if cmd.ends_with("/git") || cmd == "git" {
+                i += 1;
+                while i < params.command.len() {
+                    let t = strip_tok2(&params.command[i]);
+                    if t.is_empty() { i += 1; continue; }
+                    if matches!(t, "-C" | "--git-dir" | "--work-tree" | "-c") {
+                        i += 1; if i < params.command.len() { i += 1; }
+                        continue;
+                    }
+                    if t.starts_with("--git-dir=") || t.starts_with("--work-tree=") || t.starts_with("-c") { i += 1; continue; }
+                    if t.starts_with('-') { i += 1; continue; }
+                    break;
+                }
+                if i < params.command.len() {
+                    let sub = strip_tok2(&params.command[i]);
+                    let args: Vec<&str> = params.command[i + 1..].iter().map(|t| strip_tok2(t)).collect();
+                    let kind = match sub {
+                        "checkout" => {
+                            if args.iter().any(|a| *a == "--") {
+                                Some(SensitiveGitKind::PathCheckout)
+                            } else if args.iter().any(|a| matches!(*a, "-b" | "-B" | "--orphan" | "--detach")) {
+                                Some(SensitiveGitKind::BranchChange)
+                            } else if args.first().copied() == Some("-") {
+                                Some(SensitiveGitKind::BranchChange)
+                            } else if let Some(first_arg) = args.first() {
+                                let a = *first_arg;
+                                if !a.starts_with('-') && a != "." && a != ".." {
+                                    Some(SensitiveGitKind::BranchChange)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        "switch" => Some(SensitiveGitKind::BranchChange),
+                        "reset" => Some(SensitiveGitKind::Reset),
+                        "revert" => Some(SensitiveGitKind::Revert),
+                        _ => None,
+                    };
+                    if let Some(kind) = kind {
+                        let suggested = serde_json::to_string(&vec![
+                            "bash".to_string(),
+                            "-lc".to_string(),
+                            format!("confirm: {}", params.command.join(" ")),
+                        ]).unwrap_or_else(|_| "<failed to serialize suggested argv>".to_string());
+
+                        let guidance = guidance_for_sensitive_git(kind, "original_argv", &format!("{:?}", params.command), &suggested);
+
+                        sess
+                            .notify_background_event(&sub_id, format!("Command guard: {}", guidance.clone()))
+                            .await;
+
+                        return ResponseInputItem::FunctionCallOutput { call_id, output: FunctionCallOutputPayload { content: guidance, success: None } };
+                    }
+                }
+            }
+        }
+    }
+
     // check if this was a patch, and apply it if so
     let apply_patch_exec = match maybe_parse_apply_patch_verified(&params.command, &params.cwd) {
         MaybeApplyPatchVerified::Body(changes) => {
@@ -5207,6 +5634,7 @@ async fn handle_container_exec_with_params(
                         sub_id: sub_id.clone(),
                         call_id: call_id.clone(),
                         tx_event: sess.tx_event.clone(),
+                        session: None,
                     })
                 },
             },
@@ -5271,35 +5699,24 @@ async fn handle_sandbox_error(
         AskForApproval::Never | AskForApproval::OnRequest => {
             // Clarify when Read Only mode is the reason a command cannot proceed.
             let content = if matches!(sess.sandbox_policy, SandboxPolicy::ReadOnly) {
-                format!(
-                    "command blocked by Read Only mode: {}",
-                    error
-                )
+                format!("command blocked by Read Only mode: {error}")
             } else {
-                format!(
-                    "failed in sandbox {sandbox_type:?} with execution error: {error}"
-                )
+                format!("failed in sandbox {sandbox_type:?} with execution error: {error}")
             };
             return ResponseInputItem::FunctionCallOutput {
                 call_id,
-                output: FunctionCallOutputPayload {
-                    content,
-                    success: Some(false),
-                },
+                output: FunctionCallOutputPayload { content, success: Some(false) },
             };
         }
         AskForApproval::UnlessTrusted | AskForApproval::OnFailure => (),
     }
 
     // similarly, if the command timed out, we can simply return this failure to the model
-    if matches!(error, SandboxErr::Timeout) {
+    if matches!(error, SandboxErr::Timeout { .. }) {
         return ResponseInputItem::FunctionCallOutput {
             call_id,
             output: FunctionCallOutputPayload {
-                content: format!(
-                    "command timed out after {} milliseconds",
-                    params.timeout_duration().as_millis()
-                ),
+                content: "command timed out".to_string(),
                 success: Some(false),
             },
         };
@@ -5358,6 +5775,7 @@ async fn handle_sandbox_error(
                                 sub_id: sub_id.clone(),
                                 call_id: call_id.clone(),
                                 tx_event: sess.tx_event.clone(),
+                                session: None,
                             })
                         },
                     },
@@ -5621,6 +6039,7 @@ async fn capture_browser_screenshot(_sess: &Session) -> Result<(PathBuf, String)
         }
     }
 }
+// removed upstream exit_review_mode helper: not used in fork
 
 /// Send agent status update event to the TUI
 async fn send_agent_status_update(sess: &Session) {
@@ -5646,16 +6065,14 @@ async fn send_agent_status_update(sess: &Session) {
         })
         .collect();
 
-    let event = Event {
-        id: "agent_status".to_string(),
-        event_seq: 0,
-        msg: EventMsg::AgentStatusUpdate(AgentStatusUpdateEvent {
+    let event = sess.make_event(
+        "agent_status",
+        EventMsg::AgentStatusUpdate(AgentStatusUpdateEvent {
             agents,
             context: None,
             task: None,
         }),
-        order: None,
-    };
+    );
 
     // Send event asynchronously
     let tx_event = sess.tx_event.clone();
@@ -5672,15 +6089,13 @@ fn add_pending_screenshot(sess: &Session, screenshot_path: PathBuf, url: String)
     tracing::info!("Captured screenshot; updating UI and using per-turn injection");
 
     // Also send an immediate event to update the TUI display
-    let event = Event {
-        id: "browser_screenshot".to_string(),
-        event_seq: 0,
-        msg: EventMsg::BrowserScreenshotUpdate(BrowserScreenshotUpdateEvent {
+    let event = sess.make_event(
+        "browser_screenshot",
+        EventMsg::BrowserScreenshotUpdate(BrowserScreenshotUpdateEvent {
             screenshot_path,
             url,
         }),
-        order: None,
-    };
+    );
 
     // Send event asynchronously to avoid blocking
     let tx_event = sess.tx_event.clone();

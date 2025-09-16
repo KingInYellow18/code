@@ -17,7 +17,6 @@ use crate::app_event_sender::AppEventSender;
 use super::BottomPane;
 use super::CancellationEvent;
 use super::bottom_pane_view::BottomPaneView;
-use super::popup_consts::MAX_POPUP_ROWS;
 use super::scroll_state::ScrollState;
 use super::selection_popup_common::GenericDisplayRow;
 use super::selection_popup_common::render_rows;
@@ -40,6 +39,7 @@ pub(crate) struct ListSelectionView {
     state: ScrollState,
     complete: bool,
     app_event_tx: AppEventSender,
+    max_rows: usize,
 }
 
 impl ListSelectionView {
@@ -48,8 +48,59 @@ impl ListSelectionView {
     }
 
     fn render_dim_prefix_line(area: Rect, buf: &mut Buffer) {
-        let para = Paragraph::new(Line::from(Self::dim_prefix_span()));
+        // Render a simple blank spacer line (no glyphs like '▌')
+        let para = Paragraph::new(Line::from(""));
         para.render(area, buf);
+    }
+    
+    fn wrapped_lines_for(text: &str, width: u16) -> u16 {
+        if text.is_empty() || width == 0 { return 0; }
+        let w = width as usize;
+        let mut lines: u16 = 0;
+        for part in text.split('\n') {
+            let len = part.chars().count();
+            if len == 0 { lines = lines.saturating_add(1); continue; }
+            let mut l = (len / w) as u16;
+            if len % w != 0 { l = l.saturating_add(1); }
+            if l == 0 { l = 1; }
+            lines = lines.saturating_add(l);
+        }
+        lines
+    }
+
+    // Compute a consistent layout for both height calculation and rendering.
+    // Returns (content_width, subtitle_rows, spacer_top_rows, bottom_spacer_rows, footer_rows, rows_visible, total_height)
+    fn compute_layout(&self, total_width: u16) -> (u16, u16, u16, u16, u16, u16, u16) {
+        // Borders consume 2 cols; we also left-pad content by 1 col inside inner.
+        let inner_width = total_width.saturating_sub(2);
+        let content_width = inner_width.saturating_sub(1);
+
+        // How many list rows we want to show
+        let target_rows = (self.items.len()).clamp(1, self.max_rows) as u16;
+
+        // Subtitle wraps on content width
+        let subtitle_rows = self
+            .subtitle
+            .as_ref()
+            .map(|s| Self::wrapped_lines_for(s, content_width))
+            .unwrap_or(0);
+
+        // Always include one spacer row between subtitle/title and the list
+        let spacer_top_rows: u16 = 1;
+
+        // Footer: single line of hints when present
+        let footer_rows: u16 = if self.footer_hint.is_some() { 1 } else { 0 };
+
+        // A visual spacer between the last list row and the footer
+        let bottom_spacer_rows: u16 = if footer_rows > 0 { 1 } else { 0 };
+
+        // Content rows budget equals the rows we want to show
+        let rows_visible = target_rows;
+
+        // Total height = borders (2) + subtitle + spacer + rows + bottom spacer + footer
+        let total_height = 2 + subtitle_rows + spacer_top_rows + rows_visible + bottom_spacer_rows + footer_rows;
+
+        (content_width, subtitle_rows, spacer_top_rows, bottom_spacer_rows, footer_rows, rows_visible, total_height)
     }
     pub fn new(
         title: String,
@@ -57,6 +108,7 @@ impl ListSelectionView {
         footer_hint: Option<String>,
         items: Vec<SelectionItem>,
         app_event_tx: AppEventSender,
+        max_rows: usize,
     ) -> Self {
         let mut s = Self {
             title,
@@ -66,26 +118,27 @@ impl ListSelectionView {
             state: ScrollState::new(),
             complete: false,
             app_event_tx,
+            max_rows,
         };
         let len = s.items.len();
         if let Some(idx) = s.items.iter().position(|it| it.is_current) {
             s.state.selected_idx = Some(idx);
         }
         s.state.clamp_selection(len);
-        s.state.ensure_visible(len, MAX_POPUP_ROWS.min(len));
+        s.state.ensure_visible(len, s.max_rows.min(len));
         s
     }
 
     fn move_up(&mut self) {
         let len = self.items.len();
         self.state.move_up_wrap(len);
-        self.state.ensure_visible(len, MAX_POPUP_ROWS.min(len));
+        self.state.ensure_visible(len, self.max_rows.min(len));
     }
 
     fn move_down(&mut self) {
         let len = self.items.len();
         self.state.move_down_wrap(len);
-        self.state.ensure_visible(len, MAX_POPUP_ROWS.min(len));
+        self.state.ensure_visible(len, self.max_rows.min(len));
     }
 
     fn accept(&mut self) {
@@ -138,18 +191,9 @@ impl BottomPaneView<'_> for ListSelectionView {
         CancellationEvent::Handled
     }
 
-    fn desired_height(&self, _width: u16) -> u16 {
-        let rows = (self.items.len()).clamp(1, MAX_POPUP_ROWS);
-        // +1 for the title row, +1 for optional subtitle, +1 for optional footer
-        let mut height = rows as u16 + 1;
-        if self.subtitle.is_some() {
-            // +1 for subtitle, +1 for a blank spacer line beneath it
-            height = height.saturating_add(2);
-        }
-        if self.footer_hint.is_some() {
-            height = height.saturating_add(2);
-        }
-        height
+    fn desired_height(&self, width: u16) -> u16 {
+        let (_cw, _sub, _sp, _bsp, _foot, _rows, total) = self.compute_layout(width);
+        total
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -168,30 +212,34 @@ impl BottomPaneView<'_> for ListSelectionView {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        // Layout inside the block: optional subtitle header, rows, footer
+        // Layout inside the block: optional subtitle header, spacer, rows, footer
+        let (content_width, subtitle_rows, spacer_top, bottom_spacer_rows, footer_rows, rows_visible, _total) =
+            self.compute_layout(area.width);
         let mut next_y = inner.y;
         if let Some(sub) = &self.subtitle {
-            // Left pad by one column inside the inner area
-            let subtitle_area = Rect { x: inner.x.saturating_add(1), y: next_y, width: inner.width.saturating_sub(1), height: 1 };
-            let subtitle_spans: Vec<Span<'static>> = vec![
-                Span::styled(sub.clone(), Style::default().fg(crate::colors::text_dim())),
-            ];
-            Paragraph::new(Line::from(subtitle_spans)).render(subtitle_area, buf);
-            next_y = next_y.saturating_add(1);
-
-            // Render a visual spacer line between subtitle and the list
-            let spacer_area = Rect { x: inner.x.saturating_add(1), y: next_y, width: inner.width.saturating_sub(1), height: 1 };
+            let sub_h = subtitle_rows;
+            if sub_h > 0 {
+                let subtitle_area = Rect { x: inner.x.saturating_add(1), y: next_y, width: content_width, height: sub_h };
+                Paragraph::new(sub.clone())
+                    .style(Style::default().fg(crate::colors::text_dim()))
+                    .render(subtitle_area, buf);
+                next_y = next_y.saturating_add(sub_h);
+            }
+        }
+        if spacer_top > 0 && next_y < inner.y.saturating_add(inner.height) {
+            let spacer_area = Rect { x: inner.x.saturating_add(1), y: next_y, width: content_width, height: 1 };
             Self::render_dim_prefix_line(spacer_area, buf);
             next_y = next_y.saturating_add(1);
         }
 
-        let footer_reserved = if self.footer_hint.is_some() { 1 } else { 0 };
+        // Compute rows area height from inner
+        let reserved = bottom_spacer_rows.saturating_add(footer_rows); // exactly as measured
         let rows_area = Rect {
             // Left pad by one column
             x: inner.x.saturating_add(1),
             y: next_y,
-            width: inner.width.saturating_sub(1),
-            height: inner.height.saturating_sub(next_y.saturating_sub(inner.y)).saturating_sub(footer_reserved),
+            width: content_width,
+            height: inner.height.saturating_sub(next_y.saturating_sub(inner.y)).saturating_sub(reserved),
         };
 
         let rows: Vec<GenericDisplayRow> = self
@@ -212,18 +260,27 @@ impl BottomPaneView<'_> for ListSelectionView {
                     name: display_name,
                     match_indices: None,
                     is_current: it.is_current,
-                    description: it.description.clone(),
+                    description: if is_selected { it.description.clone() } else { None },
                     name_color: None,
                 }
             })
             .collect();
         if rows_area.height > 0 {
-            render_rows(rows_area, buf, &rows, &self.state, MAX_POPUP_ROWS, true);
+            let max_rows_to_render = rows_visible.min(rows_area.height);
+            render_rows(rows_area, buf, &rows, &self.state, max_rows_to_render as usize, true);
         }
 
         if self.footer_hint.is_some() {
-            // Left pad footer by one column
-            let footer_area = Rect { x: inner.x.saturating_add(1), y: inner.y + inner.height - 1, width: inner.width.saturating_sub(1), height: 1 };
+            // Bottom spacer above footer, if reserved
+            if bottom_spacer_rows > 0 && rows_area.height > 0 {
+                let spacer_y = inner.y + inner.height - footer_rows - bottom_spacer_rows;
+                let spacer_area = Rect { x: inner.x.saturating_add(1), y: spacer_y, width: content_width, height: bottom_spacer_rows };
+                Paragraph::new(Line::from(""))
+                    .style(Style::default().bg(crate::colors::background()).fg(crate::colors::text()))
+                    .render(spacer_area, buf);
+            }
+            // Render footer on the last inner line
+            let footer_area = Rect { x: inner.x.saturating_add(1), y: inner.y + inner.height - 1, width: content_width, height: 1 };
             let line = Line::from(vec![
                 Span::styled("↑↓", Style::default().fg(crate::colors::function())),
                 Span::styled(" Navigate  ", Style::default().fg(crate::colors::text_dim())),

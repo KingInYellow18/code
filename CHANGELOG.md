@@ -3,6 +3,48 @@
 > [!TIP]
 > We're constantly improving Code! This page documents the core changes. You can also check our [releases page](https://github.com/just-every/code/releases) for additional information.
 
+## [0.2.151] - 2025-09-16
+
+- TUI/History: append merge completion banner for clearer post-merge status. (736293a9)
+- TUI: add intersection checks for parameter inputs in AgentEditorView. (6d1775cf)
+
+## [0.2.150] - 2025-09-16
+
+- TUI/Branch: add /merge command and show diff summary in merge handoff. (eb4c2bc0, 0f254d9e, b19b2d16)
+- TUI/Agents: refine editor UX and persistence; keep instructions/buttons visible and tidy spacing. (639fe9dd, f8e51fb9, 508e187f)
+- TUI/History: render exec status separately, keep gutter icon, and refine short-command and path labels. (2ec5e655, fd8f7258, 59975907, a27f3aab)
+- Core/TUI: restore jq search and alt-screen scrolling; treat jq filters as searches. (8c250e46, ec1f12cb, 764cd276)
+
+## [0.2.149] - 2025-09-16
+
+- TUI/Agents: redesign editor and list; keep Save/Cancel visible, add Delete, better navigation and scrolling. (eb024bee, 8c2caf76, 647fed36)
+- TUI/Model: restore /model selector and presets; persist model defaults; default local agent is "code". (84fbdda1, 85159d1f, 60408ab1)
+- TUI/Reasoning: show reasoning level in header; keep reasoning cell visible; polish run cells and log claims. (d7d9d96d, 2f471aee, 8efe4723)
+- Exec/Resume: detect absolute bash and flag risky paths; fix race in unified exec; show abort and header when resuming. (4744c220, d555b684, 50262a44, 6581da9b)
+- UX: skip animations on small terminals, update splash, and refine onboarding messaging. (934d7289, 9baa5c33, 5c583fe8)
+
+## [0.2.148] - 2025-09-14
+
+- Core/Agents: mirror Qwen/DashScope API vars; respect QWEN_MODEL; add qwen examples in config.toml.example. (8a935c18)
+- Shortcuts: set Qwen-coder as default for /plan and related commands. (d1272d5e)
+
+## [0.2.147] - 2025-09-14
+
+- Core/Git Worktree: add opt-in mirroring of modified submodule pointers via CODEX_BRANCH_INCLUDE_SUBMODULES. (59a6107d)
+- Core/Git: keep default behavior unchanged to avoid unexpected submodule pointer updates. (59a6107d)
+
+## [0.2.146] - 2025-09-14
+
+- TUI: rewrite web.run citation tokens into inline markdown links. (66dbc5f2)
+- Core: fix /new to fully reset chat context. (d4aee996)
+- Core: handle sandboxed agent spawn when program missing. (5417eb26)
+- Workflows: thread issue comments; show digests oldest→newest in triage. (e63f5fc3)
+
+## [0.2.145] - 2025-09-13
+
+- CI/Issue comments: ensure proxy script is checked out in both jobs; align with upstream flows. (81660396)
+- CI: gate issue-comment job on OPENAI_API_KEY via env and avoid secrets in if conditions. (c65cf3be)
+
 ## [0.2.144] - 2025-09-13
 
 - CI/Issue comments: make agent assertion non-fatal; fail only on proxy 5xx; keep fallback path working. (51479121)

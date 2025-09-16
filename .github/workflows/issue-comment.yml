@@ -49,8 +49,13 @@ jobs:
        github.event.workflow_run.conclusion == 'success')
       || (github.event_name == 'workflow_dispatch' && (inputs.type == 'preview' || !inputs.type))
     runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Resolve PR + Issue
         id: meta
         uses: actions/github-script@v7
@@ -69,7 +74,18 @@ jobs:
               prNumber = Number((context.payload.inputs && context.payload.inputs.pr_number) || 0);
             }
             if (!prNumber) {
-              core.setFailed('Unable to resolve PR number.');
+              // No PR associated with this workflow_run (e.g., manual re-run or non-PR trigger).
+              // Do not fail the job; set empty outputs so downstream steps can skip safely.
+              core.notice('No PR associated with this run; skipping preview issue comment steps.');
+              core.setOutput('pr_number', '');
+              core.setOutput('issue_number', '0');
+              core.setOutput('title', '');
+              core.setOutput('body', '');
+              core.setOutput('head', '');
+              core.setOutput('base', '');
+              core.setOutput('changed', '');
+              core.setOutput('commits', '');
+              core.setOutput('issue_author', '');
               return;
             }
 
@@ -134,6 +150,7 @@ jobs:
             core.setOutput('issue_author', issueAuthor);
 
       - name: Prepare context file
+        if: steps.meta.outputs.pr_number
         id: ctx
         uses: actions/github-script@v7
         env:
@@ -236,8 +253,9 @@ jobs:
                 lines.push('');
                 const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
                 if (comments.length) {
-                  lines.push('### Recent issue comments (newest first, up to 10)');
-                  const last = comments.slice(-10).reverse();
+                  lines.push('### Recent issue comments (oldest first, up to 10)');
+                  // Keep chronological order so the newest appears at the bottom
+                  const last = comments.slice(-10);
                   for (const c of last) {
                     const when = (c.created_at || '').replace('T',' ').replace('Z','');
                     lines.push(`- [@${c.user?.login||'unknown'} at ${when}]`);
@@ -258,10 +276,8 @@ jobs:
             fs.writeFileSync('.github/auto/ISSUE_PREVIEW_CONTEXT.md', lines.join('\n'));
 
       - name: Start local OpenAI proxy (optional; hardened)
-        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        if: steps.meta.outputs.pr_number && env.OPENAI_API_KEY != ''
         id: proxy
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
           mkdir -p .github/auto
@@ -269,7 +285,7 @@ jobs:
           for i in {1..30}; do if nc -z 127.0.0.1 5056; then break; else sleep 0.2; fi; done || true
 
       - name: Print proxy startup log tail
-        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        if: steps.meta.outputs.pr_number && env.OPENAI_API_KEY != ''
         run: |
           echo '### openai-proxy.log (tail)' >> "$GITHUB_STEP_SUMMARY"
           { echo '```'; tail -n 80 .github/auto/openai-proxy.log || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
@@ -277,7 +293,7 @@ jobs:
 
       - name: Generate comment with Code (read-only)
         id: gen
-        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        if: steps.meta.outputs.pr_number && env.OPENAI_API_KEY != ''
         continue-on-error: true
         env:
           ISSUE_AUTHOR: ${{ steps.meta.outputs.issue_author }}
@@ -327,7 +343,7 @@ jobs:
           true
           set -e
       - name: Assert agent success (fail on server 5xx only; tolerate local stream errors)
-        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        if: steps.meta.outputs.pr_number && env.OPENAI_API_KEY != ''
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -366,6 +382,7 @@ jobs:
           JS
 
       - name: Post comment to linked issue (upsert by marker; fallback to stock)
+        if: steps.meta.outputs.pr_number
         uses: actions/github-script@v7
         env:
           ISSUE_NUMBER: ${{ steps.meta.outputs.issue_number }}
@@ -476,6 +493,9 @@ jobs:
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Prepare triage context
         id: ctx
         uses: actions/github-script@v7
@@ -497,8 +517,9 @@ jobs:
             if (issue && issue.body) { lines.push('## Issue body'); lines.push(issue.body); lines.push(''); }
             if (process.env.CONTEXT_TEXT && process.env.CONTEXT_TEXT.trim()) { lines.push('## Triage context'); lines.push(process.env.CONTEXT_TEXT.trim()); lines.push(''); }
             if (comments.length) {
-              lines.push('## Recent comments (newest first, up to 10)');
-              const last = comments.slice(-10).reverse();
+              lines.push('## Recent comments (oldest first, up to 10)');
+              // Chronological order: newest at the bottom
+              const last = comments.slice(-10);
               for (const c of last) {
                 const when = (c.created_at || '').replace('T',' ').replace('Z','');
                 lines.push(`- [@${c.user?.login||'unknown'} at ${when}]`);
@@ -533,7 +554,7 @@ jobs:
         run: |
           set -euo pipefail
           SAFE_PATH="$PATH"; SAFE_HOME="$HOME";
-          PROMPT=$(cat <<'EOP'
+          PROMPT=$(cat <<EOP
           <task>
           Write a brief, kind GitHub issue reply explaining that the bot did not auto-apply changes yet and needs more details.
           - Do not include any internal IDs, request IDs, or API errors.
@@ -541,14 +562,11 @@ jobs:
           - Ask for concrete steps to reproduce, expected vs actual behavior, and logs or screenshots.
           - Keep it to 3–6 short sentences. Friendly, clear, and helpful.
           - Address the issue author if visible in the context.
-          Output ONLY the final Markdown inside <comment>…</comment>.
+          Respond with exactly one <comment>…</comment> block containing the final Markdown, and nothing else.
           </task>
           <context>
           $(cat .github/auto/ISSUE_TRIAGE_CONTEXT.md)
           </context>
-          <comment>
-          …final Markdown comment…
-          </comment>
           EOP
           )
           set +e
@@ -564,7 +582,7 @@ jobs:
           set -e
 
       - name: Extract generated comment
-        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        if: env.OPENAI_API_KEY != ''
         run: |
           set -euo pipefail
           node - <<'JS'
@@ -584,7 +602,7 @@ jobs:
           JS
 
       - name: Post generated comment to issue
-        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        if: env.OPENAI_API_KEY != ''
         uses: actions/github-script@v7
         env:
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue_number }}

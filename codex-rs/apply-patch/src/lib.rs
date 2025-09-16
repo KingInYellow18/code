@@ -32,6 +32,18 @@ pub const APPLY_PATCH_TOOL_INSTRUCTIONS: &str = include_str!("../apply_patch_too
 
 const APPLY_PATCH_COMMANDS: [&str; 2] = ["apply_patch", "applypatch"];
 
+fn is_bash_like(cmd: &str) -> bool {
+    let trimmed = cmd.trim_matches('"').trim_matches('\'');
+    if trimmed.eq_ignore_ascii_case("bash") || trimmed.eq_ignore_ascii_case("bash.exe") {
+        return true;
+    }
+    std::path::Path::new(trimmed)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|name| name.eq_ignore_ascii_case("bash") || name.eq_ignore_ascii_case("bash.exe"))
+        .unwrap_or(false)
+}
+
 /// Details about an embedded `apply_patch` heredoc found inside a larger shell script.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmbeddedApplyPatch {
@@ -63,6 +75,11 @@ pub enum ApplyPatchError {
     /// Error that occurs while computing replacements when applying patch chunks
     #[error("{0}")]
     ComputeReplacements(String),
+    /// A raw patch body was provided without an explicit `apply_patch` invocation.
+    #[error(
+        "patch detected without explicit call to apply_patch. Rerun as [\"apply_patch\", \"<patch>\"]"
+    )]
+    ImplicitInvocation,
 }
 
 impl From<std::io::Error> for ApplyPatchError {
@@ -116,26 +133,13 @@ pub struct ApplyPatchArgs {
 
 pub fn maybe_parse_apply_patch(argv: &[String]) -> MaybeApplyPatch {
     match argv {
+        // Direct invocation: apply_patch <patch>
         [cmd, body] if APPLY_PATCH_COMMANDS.contains(&cmd.as_str()) => match parse_patch(body) {
             Ok(source) => MaybeApplyPatch::Body(source),
             Err(e) => MaybeApplyPatch::PatchParseError(e),
         },
-        // Handle common shell wrappers: bash/sh/zsh with -lc or -c
-        [shell, flag, script]
-            if {
-                // accept absolute paths too (e.g., /bin/bash, /usr/bin/sh)
-                let shell_name = std::path::Path::new(shell)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                let is_shell = matches!(shell_name, "bash" | "sh" | "zsh");
-                let is_flag = matches!(flag.as_str(), "-lc" | "-c");
-                let starts_with_apply = APPLY_PATCH_COMMANDS
-                    .iter()
-                    .any(|cmd| script.trim_start().starts_with(cmd));
-                is_shell && is_flag && starts_with_apply
-            } =>
-        {
+        // Bash heredoc form: (optional `cd <path> &&`) apply_patch <<'EOF' ...
+        [bash, flag, script] if is_bash_like(bash) && flag == "-lc" => {
             match extract_apply_patch_from_bash(script) {
                 Ok((body, _maybe_cd)) => match parse_patch(&body) {
                     Ok(source) => MaybeApplyPatch::Body(source),
@@ -242,6 +246,26 @@ impl ApplyPatchAction {
 /// cwd must be an absolute path so that we can resolve relative paths in the
 /// patch.
 pub fn maybe_parse_apply_patch_verified(argv: &[String], cwd: &Path) -> MaybeApplyPatchVerified {
+    // Detect a raw patch body passed directly as the command or as the body of a bash -lc
+    // script. In these cases, report an explicit error rather than applying the patch.
+    match argv {
+        [body] => {
+            if parse_patch(body).is_ok() {
+                return MaybeApplyPatchVerified::CorrectnessError(
+                    ApplyPatchError::ImplicitInvocation,
+                );
+            }
+        }
+        [bash, flag, script] if is_bash_like(bash) && flag == "-lc" => {
+            if parse_patch(script).is_ok() {
+                return MaybeApplyPatchVerified::CorrectnessError(
+                    ApplyPatchError::ImplicitInvocation,
+                );
+            }
+        }
+        _ => {}
+    }
+
     match maybe_parse_apply_patch(argv) {
         MaybeApplyPatch::Body(ApplyPatchArgs {
             patch,
@@ -947,6 +971,45 @@ mod tests {
         assert!(matches!(
             maybe_parse_apply_patch(&args),
             MaybeApplyPatch::NotApplyPatch
+        ));
+    }
+
+    #[test]
+    fn test_absolute_bash_detects_apply_patch() {
+        let script = heredoc_script("");
+        let args = vec!["/bin/bash".to_string(), "-lc".to_string(), script.clone()];
+        match maybe_parse_apply_patch(&args) {
+            MaybeApplyPatch::Body(ApplyPatchArgs { hunks, .. }) => {
+                assert_eq!(hunks, expected_single_add());
+            }
+            other => panic!("expected MaybeApplyPatch::Body got {other:?}"),
+        }
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            maybe_parse_apply_patch_verified(&args, dir.path()),
+            MaybeApplyPatchVerified::Body(_)
+        ));
+    }
+
+    #[test]
+    fn test_implicit_patch_single_arg_is_error() {
+        let patch = "*** Begin Patch\n*** Add File: foo\n+hi\n*** End Patch".to_string();
+        let args = vec![patch];
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            maybe_parse_apply_patch_verified(&args, dir.path()),
+            MaybeApplyPatchVerified::CorrectnessError(ApplyPatchError::ImplicitInvocation)
+        ));
+    }
+
+    #[test]
+    fn test_implicit_patch_bash_script_is_error() {
+        let script = "*** Begin Patch\n*** Add File: foo\n+hi\n*** End Patch";
+        let args = args_bash(script);
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            maybe_parse_apply_patch_verified(&args, dir.path()),
+            MaybeApplyPatchVerified::CorrectnessError(ApplyPatchError::ImplicitInvocation)
         ));
     }
 

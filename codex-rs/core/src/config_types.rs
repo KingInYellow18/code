@@ -11,6 +11,130 @@ use serde::Deserialize;
 use serde::Serialize;
 use strum_macros::Display;
 
+/// Configuration for commands that require an explicit `confirm:` prefix.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub struct ConfirmGuardConfig {
+    /// List of regex patterns applied to the raw command (joined argv or shell script).
+    #[serde(default)]
+    pub patterns: Vec<ConfirmGuardPattern>,
+}
+
+impl Default for ConfirmGuardConfig {
+    fn default() -> Self {
+        Self { patterns: default_confirm_guard_patterns() }
+    }
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub struct ConfirmGuardPattern {
+    /// ECMA-style regular expression matched against the command string.
+    pub regex: String,
+    /// Optional custom guidance text surfaced when the guard triggers.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+fn default_confirm_guard_patterns() -> Vec<ConfirmGuardPattern> {
+    vec![
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*git\s+reset\b".to_string(),
+            message: Some("Blocked git reset. Reset rewrites the working tree/index and may delete local work. Resend with 'confirm:' if you're certain.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*git\s+checkout\s+--\b".to_string(),
+            message: Some("Blocked git checkout -- <paths>. This overwrites local modifications; resend with 'confirm:' to proceed.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*git\s+checkout\s+(?:-b|-B|--orphan|--detach)\b".to_string(),
+            message: Some("Blocked git checkout with branch-changing flag. Switching branches can discard or hide in-progress changes.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*git\s+checkout\s+-\b".to_string(),
+            message: Some("Blocked git checkout -. Confirm before switching back to the previous branch.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*git\s+switch\b.*(?:-c|--detach)".to_string(),
+            message: Some("Blocked git switch creating or detaching a branch. Resend with 'confirm:' if requested.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*git\s+switch\s+[^\s-][^\s]*".to_string(),
+            message: Some("Blocked git switch <branch>. Branch changes can discard or hide work; confirm before continuing.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*git\s+clean\b.*(?:-f|--force|-x|-X|-d)".to_string(),
+            message: Some("Blocked git clean with destructive flags. This deletes untracked files or build artifacts.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*git\s+push\b.*(?:--force|-f)".to_string(),
+            message: Some("Blocked git push --force. Force pushes rewrite remote history; only continue if explicitly requested.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*(?:sudo\s+)?rm\s+-[a-z-]*rf[a-z-]*\s+(?:--\s+)?(?:\.|\.\.|\./|/|\*)(?:\s|$)".to_string(),
+            message: Some("Blocked rm -rf targeting a broad path (., .., /, or *). Confirm before destructive delete.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*(?:sudo\s+)?rm\s+-[a-z-]*r[a-z-]*\s+-[a-z-]*f[a-z-]*\s+(?:--\s+)?(?:\.|\.\.|\./|/|\*)(?:\s|$)".to_string(),
+            message: Some("Blocked rm -r/-f combination targeting broad paths. Resend with 'confirm:' if you intend to wipe this tree.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*(?:sudo\s+)?rm\s+-[a-z-]*f[a-z-]*\s+-[a-z-]*r[a-z-]*\s+(?:--\s+)?(?:\.|\.\.|\./|/|\*)(?:\s|$)".to_string(),
+            message: Some("Blocked rm -f/-r combination targeting broad paths. Confirm before running.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*(?:sudo\s+)?find\s+\.(?:\s|$).*\s-delete\b".to_string(),
+            message: Some("Blocked find . ... -delete. Recursive deletes require confirmation.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*(?:sudo\s+)?find\s+\.(?:\s|$).*\s-exec\s+rm\b".to_string(),
+            message: Some("Blocked find . ... -exec rm. Confirm before running recursive rm.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*(?:sudo\s+)?trash\s+-[a-z-]*r[a-z-]*f[a-z-]*\b".to_string(),
+            message: Some("Blocked trash -rf. Bulk trash operations can delete large portions of the workspace.".to_string()),
+        },
+        ConfirmGuardPattern {
+            regex: r"(?i)^\s*(?:sudo\s+)?fd\b.*(?:--exec|-x)\s+rm\b".to_string(),
+            message: Some("Blocked fd … --exec rm. Confirm before piping search results into rm.".to_string()),
+        },
+    ]
+}
+
+/// Configuration for a subagent slash command (e.g., plan/solve/code or custom)
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct SubagentCommandConfig {
+    /// Name of the command (e.g., "plan", "solve", "code", or custom)
+    pub name: String,
+
+    /// Whether agents launched for this command should run in read-only mode
+    /// Defaults: plan/solve=true, code=false (applied if not specified here)
+    #[serde(default)]
+    pub read_only: bool,
+
+    /// Agent names to enable for this command. If empty, falls back to
+    /// enabled agents from `[[agents]]`, or built-in defaults.
+    #[serde(default)]
+    pub agents: Vec<String>,
+
+    /// Extra instructions to append to the orchestrator (Code) prompt.
+    #[serde(default)]
+    pub orchestrator_instructions: Option<String>,
+
+    /// Extra instructions that the orchestrator should append to the prompt
+    /// given to each launched agent.
+    #[serde(default)]
+    pub agent_instructions: Option<String>,
+}
+
+/// Top-level subagents section containing a list of commands.
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct SubagentsToml {
+    #[serde(default)]
+    pub commands: Vec<SubagentCommandConfig>,
+}
+
 /// Configuration for external agent models
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -18,7 +142,9 @@ pub struct AgentConfig {
     /// Name of the agent (e.g., "claude", "gemini", "gpt-4")
     pub name: String,
 
-    /// Command to execute the agent (e.g., "claude", "gemini")
+    /// Command to execute the agent (e.g., "claude", "gemini").
+    /// If omitted, defaults to the agent `name` during config load.
+    #[serde(default)]
     pub command: String,
 
     /// Optional arguments to pass to the agent command
@@ -40,6 +166,23 @@ pub struct AgentConfig {
     /// Optional environment variables for the agent
     #[serde(default)]
     pub env: Option<HashMap<String, String>>,
+
+    /// Optional arguments to pass only when the agent is executed in
+    /// read-only mode. When present, these are preferred over `args` for
+    /// read-only runs.
+    #[serde(default)]
+    pub args_read_only: Option<Vec<String>>,
+
+    /// Optional arguments to pass only when the agent is executed with write
+    /// permissions. When present, these are preferred over `args` for write
+    /// runs.
+    #[serde(default)]
+    pub args_write: Option<Vec<String>>,
+
+    /// Optional per-agent instructions. When set, these are prepended to the
+    /// prompt provided to the agent whenever it runs.
+    #[serde(default)]
+    pub instructions: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -126,6 +269,19 @@ pub enum HistoryPersistence {
     None,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum Notifications {
+    Enabled(bool),
+    Custom(Vec<String>),
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self::Enabled(false)
+    }
+}
+
 /// Collection of settings that are specific to the TUI.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 pub struct Tui {
@@ -149,6 +305,11 @@ pub struct Tui {
     #[serde(default)]
     pub spinner: SpinnerSelection,
 
+    /// Enable desktop notifications from the TUI when the terminal is unfocused.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub notifications: Notifications,
+
     /// Whether to use the terminal's Alternate Screen (full-screen) mode.
     /// When false, Codex renders nothing and leaves the standard terminal
     /// buffer visible; users can toggle back to Alternate Screen at runtime
@@ -170,6 +331,7 @@ impl Default for Tui {
             show_reasoning: false,
             stream: StreamConfig::default(),
             spinner: SpinnerSelection::default(),
+            notifications: Notifications::default(),
             alternate_screen: true,
         }
     }
@@ -229,6 +391,14 @@ impl Default for StreamConfig {
             responsive: false,
         }
     }
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, Default, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReasoningSummaryFormat {
+    #[default]
+    None,
+    Experimental,
 }
 
 /// Theme configuration for the TUI

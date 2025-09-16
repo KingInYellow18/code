@@ -71,8 +71,11 @@ pub(crate) enum AppEvent {
     /// Signal that agents are about to start (triggered when /plan, /solve, /code commands are entered)
     PrepareAgents,
 
-    /// Update the reasoning effort level
-    UpdateReasoningEffort(ReasoningEffort),
+    /// Update the model and optional reasoning effort preset
+    UpdateModelSelection {
+        model: String,
+        effort: Option<ReasoningEffort>,
+    },
 
     /// Update the text verbosity level
     UpdateTextVerbosity(TextVerbosity),
@@ -86,8 +89,26 @@ pub(crate) enum AppEvent {
     /// Prefill the composer input with the given text
     PrefillComposer(String),
 
+    /// Submit a message with hidden preface instructions
+    SubmitTextWithPreface { visible: String, preface: String },
+
     /// Update the theme (with history event)
     UpdateTheme(ThemeName),
+    /// Add or update a subagent command in memory (UI already persisted to config.toml)
+    UpdateSubagentCommand(codex_core::config_types::SubagentCommandConfig),
+    /// Remove a subagent command from memory (UI already deleted from config.toml)
+    DeleteSubagentCommand(String),
+    /// Return to the Agents settings list view
+    // ShowAgentsSettings removed; overview replaces it
+    /// Return to the Agents overview (Agents + Commands)
+    ShowAgentsOverview,
+    /// Open the agent editor form for a specific agent name
+    ShowAgentEditor { name: String },
+    // ShowSubagentEditor removed; use ShowSubagentEditorForName or ShowSubagentEditorNew
+    /// Open the subagent editor for a specific command name; ChatWidget supplies data
+    ShowSubagentEditorForName { name: String },
+    /// Open a blank subagent editor to create a new command
+    ShowSubagentEditorNew,
 
     /// Preview theme (no history event)
     PreviewTheme(ThemeName),
@@ -124,6 +145,9 @@ pub(crate) enum AppEvent {
     /// Insert a background event near the top of the current request so it
     /// appears above imminent provider output (e.g. above Exec begin).
     InsertBackgroundEventEarly(String),
+    /// Insert a background event at the end of the current request so it
+    /// follows previously rendered content.
+    InsertBackgroundEventLate(String),
 
     #[allow(dead_code)]
     StartCommitAnimation,
@@ -166,5 +190,15 @@ pub(crate) enum AppEvent {
     /// (clear spinner/status, finalize running exec/tool cells) while the core
     /// continues its own abort/cleanup in parallel.
     CancelRunningTask,
+    /// Add or update an agent's settings (enabled, params, instructions)
+    UpdateAgentConfig {
+        name: String,
+        enabled: bool,
+        args_read_only: Option<Vec<String>>,
+        args_write: Option<Vec<String>>,
+        instructions: Option<String>,
+    },
     
 }
+
+// No helper constructor; use `AppEvent::CodexEvent(ev)` directly to avoid shadowing.

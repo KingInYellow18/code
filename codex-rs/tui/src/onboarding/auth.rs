@@ -20,13 +20,19 @@ use codex_login::AuthMode;
 use codex_core::claude_auth::{ClaudeAuthMode, ClaudeAuth, SubscriptionInfo};
 use codex_core::unified_auth::{UnifiedAuthManager, AuthProvider as UnifiedAuthProvider};
 
+use codex_core::config::GPT_5_CODEX_MEDIUM_MODEL;
+use codex_core::model_family::{derive_default_model_family, find_family_for_model};
+
 use crate::LoginStatus;
+use crate::app::ChatWidgetArgs;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
 use crate::onboarding::onboarding_screen::StepStateProvider;
 use crate::shimmer::shimmer_spans;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use super::onboarding_screen::StepState;
 // no additional imports
@@ -123,6 +129,7 @@ pub(crate) struct AuthModeWidget {
     pub login_status: LoginStatus,
     pub preferred_auth_method: AuthMode,
     pub unified_auth: Option<UnifiedAuthManager>,
+    pub chat_widget_args: Arc<Mutex<ChatWidgetArgs>>,
 }
 
 impl AuthModeWidget {
@@ -835,6 +842,7 @@ impl AuthModeWidget {
         // If we're already authenticated with ChatGPT, don't start a new login –
         // just proceed to the success message flow.
         if matches!(self.login_status, LoginStatus::AuthMode(AuthMode::ChatGPT)) {
+            self.apply_chatgpt_login_side_effects();
             self.sign_in_state = SignInState::ChatGptSuccess;
             self.event_tx.send(AppEvent::RequestRedraw);
             return;
@@ -883,6 +891,25 @@ impl AuthModeWidget {
         }
 
         self.event_tx.send(AppEvent::RequestRedraw);
+    }
+
+    pub(crate) fn apply_chatgpt_login_side_effects(&mut self) {
+        self.login_status = LoginStatus::AuthMode(AuthMode::ChatGPT);
+        if let Ok(mut args) = self.chat_widget_args.lock() {
+            args.config.using_chatgpt_auth = true;
+            if args
+                .config
+                .model
+                .eq_ignore_ascii_case("gpt-5")
+            {
+                let new_model = GPT_5_CODEX_MEDIUM_MODEL.to_string();
+                args.config.model = new_model.clone();
+
+                let family = find_family_for_model(&new_model)
+                    .unwrap_or_else(|| derive_default_model_family(&new_model));
+                args.config.model_family = family;
+            }
+        }
     }
 }
 

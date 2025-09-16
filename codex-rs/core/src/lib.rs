@@ -8,6 +8,7 @@
 
 mod agent_tool;
 pub mod agent_auth;
+pub mod agent_defaults;
 mod apply_patch;
 pub mod auth;
 pub mod claude_auth;
@@ -28,6 +29,7 @@ pub use codex_conversation::CodexConversation;
 pub mod config;
 pub mod config_profile;
 pub mod config_types;
+pub mod config_edit;
 mod conversation_history;
 pub mod custom_prompts;
 mod environment_context;
@@ -80,6 +82,8 @@ pub mod terminal;
 mod tool_apply_patch;
 pub mod turn_diff_tracker;
 pub use rollout::list::ConversationsPage;
+pub use rollout::list::find_conversation_path_by_id_str;
+pub use rollout::recorder::RolloutRecorder;
 mod user_notification;
 pub mod util;
 pub mod http_client;

@@ -3,6 +3,7 @@ use chrono::Duration;
 use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
+use uuid::Uuid;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,16 +12,12 @@ use tokio::process::Command;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 use crate::config_types::AgentConfig;
 use crate::openai_tools::JsonSchema;
 use crate::openai_tools::OpenAiTool;
 use crate::openai_tools::ResponsesApiTool;
 use crate::protocol::AgentInfo;
-use crate::protocol::AgentStatusUpdateEvent;
-use crate::protocol::Event;
-use crate::protocol::EventMsg;
 
 // Agent status enum
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -70,9 +67,16 @@ lazy_static::lazy_static! {
 pub struct AgentManager {
     agents: HashMap<String, Agent>,
     handles: HashMap<String, JoinHandle<()>>,
-    event_sender: Option<mpsc::UnboundedSender<Event>>,
+    event_sender: Option<mpsc::UnboundedSender<AgentStatusUpdatePayload>>,
     /// Optional Claude authentication coordinator for quota management
     claude_auth_coordinator: Option<Arc<crate::agent_auth::AgentAuthCoordinator>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentStatusUpdatePayload {
+    pub agents: Vec<AgentInfo>,
+    pub context: Option<String>,
+    pub task: Option<String>,
 }
 
 impl AgentManager {
@@ -85,7 +89,7 @@ impl AgentManager {
         }
     }
 
-    pub fn set_event_sender(&mut self, sender: mpsc::UnboundedSender<Event>) {
+    pub fn set_event_sender(&mut self, sender: mpsc::UnboundedSender<AgentStatusUpdatePayload>) {
         self.event_sender = Some(sender);
     }
 
@@ -122,19 +126,8 @@ impl AgentManager {
                 .next()
                 .map(|agent| (agent.context.clone(), agent.output_goal.clone()))
                 .unwrap_or((None, None));
-
-            let event = Event {
-                id: uuid::Uuid::new_v4().to_string(),
-                event_seq: 0,
-                msg: EventMsg::AgentStatusUpdate(AgentStatusUpdateEvent {
-                    agents,
-                    context,
-                    task,
-                }),
-                order: None,
-            };
-
-            let _ = sender.send(Event { order: None, ..event });
+            let payload = AgentStatusUpdatePayload { agents, context, task };
+            let _ = sender.send(payload);
         }
     }
 
@@ -491,6 +484,14 @@ async fn execute_agent(
 
     // Build the full prompt with context
     let mut full_prompt = prompt.clone();
+    // Prepend any per-agent instructions from config when available
+    if let Some(cfg) = config.as_ref() {
+        if let Some(instr) = cfg.instructions.as_ref() {
+            if !instr.trim().is_empty() {
+                full_prompt = format!("{}\n\n{}", instr.trim(), full_prompt);
+            }
+        }
+    }
     if let Some(context) = &context {
         full_prompt = format!("Context: {}\n\nAgent: {}", context, full_prompt);
     }
@@ -572,7 +573,8 @@ async fn execute_model_with_permissions(
     claude_coordinator: Option<Arc<crate::agent_auth::AgentAuthCoordinator>>,
     claude_session_id: Option<String>,
 ) -> Result<String, String> {
-    // Helper: cross‑platform check whether an executable is available in PATH.
+    // Helper: cross‑platform check whether an executable is available in PATH
+    // and is directly spawnable by std::process::Command (no shell wrappers).
     fn command_exists(cmd: &str) -> bool {
         // Absolute/relative path with separators: check directly (files only).
         if cmd.contains(std::path::MAIN_SEPARATOR) || cmd.contains('/') || cmd.contains('\\') {
@@ -581,7 +583,17 @@ async fn execute_model_with_permissions(
 
         #[cfg(target_os = "windows")]
         {
-            return which::which(cmd).map(|p| p.is_file()).unwrap_or(false);
+            // On Windows, ensure we only accept spawnable extensions. PowerShell
+            // scripts like .ps1 are not directly spawnable via Command::new.
+            if let Ok(p) = which::which(cmd) {
+                if !p.is_file() { return false; }
+                match p.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
+                    Some(ext) if matches!(ext.as_str(), "exe" | "com" | "cmd" | "bat") => true,
+                    _ => false,
+                }
+            } else {
+                false
+            }
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -636,9 +648,17 @@ async fn execute_model_with_permissions(
             }
         }
 
-        // Add any configured args first
-        for arg in &cfg.args {
-            cmd.arg(arg);
+        // Add any configured args first, preferring mode‑specific values
+        if read_only {
+            if let Some(ro) = cfg.args_read_only.as_ref() {
+                for arg in ro { cmd.arg(arg); }
+            } else {
+                for arg in &cfg.args { cmd.arg(arg); }
+            }
+        } else if let Some(w) = cfg.args_write.as_ref() {
+            for arg in w { cmd.arg(arg); }
+        } else {
+            for arg in &cfg.args { cmd.arg(arg); }
         }
     }
 
@@ -647,35 +667,24 @@ async fn execute_model_with_permissions(
     let model_name = if config.is_some() { command.as_str() } else { model_lower.as_str() };
 
     match model_name {
-        "claude" => {
-            if read_only {
-                cmd.args(&[
-                    "--allowedTools",
-                    "Bash(ls:*), Bash(cat:*), Bash(grep:*), Bash(git status:*), Bash(git log:*), Bash(find:*), Read, Grep, Glob, LS, WebFetch, TodoRead, TodoWrite, WebSearch",
-                    "-p",
-                    prompt
-                ]);
-            } else {
-                cmd.args(&["--dangerously-skip-permissions", "-p", prompt]);
-            }
-        }
-        "gemini" => {
-            if read_only {
-                cmd.args(&["-m", "gemini-2.5-pro", "-p", prompt]);
-            } else {
-                cmd.args(&["-m", "gemini-2.5-pro", "-y", "-p", prompt]);
-            }
+        "claude" | "gemini" | "qwen" => {
+            let mut defaults = crate::agent_defaults::default_params_for(model_name, read_only);
+            defaults.push("-p".into());
+            defaults.push(prompt.to_string());
+            cmd.args(defaults);
         }
         "codex" | "code" => {
-            if read_only {
-                cmd.args(&["-s", "read-only", "-a", "never", "exec", "--skip-git-repo-check", prompt]);
+            // If config provided explicit args for this mode, do not append defaults.
+            let have_mode_args = config.as_ref().map(|c| if read_only { c.args_read_only.is_some() } else { c.args_write.is_some() }).unwrap_or(false);
+            if have_mode_args {
+                cmd.arg(prompt);
             } else {
-                cmd.args(&["-s", "workspace-write", "-a", "never", "exec", "--skip-git-repo-check", prompt]);
+                let mut defaults = crate::agent_defaults::default_params_for(model_name, read_only);
+                defaults.push(prompt.to_string());
+                cmd.args(defaults);
             }
         }
-        _ => {
-            return Err(format!("Unknown model: {}", model));
-        }
+        _ => { return Err(format!("Unknown model: {}", model)); }
     }
 
     // Proactively check for presence of external command before spawn when not
@@ -719,7 +728,7 @@ async fn execute_model_with_permissions(
         if let Some(anthropic_base) = env.get("ANTHROPIC_BASE_URL").cloned() {
             env.entry("CLAUDE_BASE_URL".to_string()).or_insert(anthropic_base);
         }
-        
+
         // Try to inject Claude authentication from unified auth system if available
         // This allows agents to use Claude even when not explicitly configured
         if !env.contains_key("ANTHROPIC_API_KEY") && !env.contains_key("CLAUDE_API_KEY") {
@@ -730,7 +739,7 @@ async fn execute_model_with_permissions(
             }) {
                 let codex_home_path = std::path::PathBuf::from(codex_home);
                 let claude_auth_file = crate::claude_auth::get_claude_auth_file(&codex_home_path);
-                
+
                 // Try to read Claude API key from auth file
                 if claude_auth_file.exists() {
                     if let Ok(content) = std::fs::read_to_string(&claude_auth_file) {
@@ -743,7 +752,7 @@ async fn execute_model_with_permissions(
                         }
                     }
                 }
-                
+
                 // Also check for environment variable fallback
                 if !env.contains_key("ANTHROPIC_API_KEY") {
                     if let Some(claude_key) = crate::claude_auth::read_claude_api_key_from_env() {
@@ -753,6 +762,21 @@ async fn execute_model_with_permissions(
                     }
                 }
             }
+        }
+
+        // Qwen/DashScope convenience: mirror API keys and base URLs both ways so
+        // either variable name works across tools.
+        if let Some(qwen_key) = env.get("QWEN_API_KEY").cloned() {
+            env.entry("DASHSCOPE_API_KEY".to_string()).or_insert(qwen_key);
+        }
+        if let Some(dashscope_key) = env.get("DASHSCOPE_API_KEY").cloned() {
+            env.entry("QWEN_API_KEY".to_string()).or_insert(dashscope_key);
+        }
+        if let Some(qwen_base) = env.get("QWEN_BASE_URL").cloned() {
+            env.entry("DASHSCOPE_BASE_URL".to_string()).or_insert(qwen_base);
+        }
+        if let Some(ds_base) = env.get("DASHSCOPE_BASE_URL").cloned() {
+            env.entry("QWEN_BASE_URL".to_string()).or_insert(ds_base);
         }
         // Reduce startup overhead for Claude CLI: disable auto-updater/telemetry.
         env.entry("DISABLE_AUTOUPDATER".to_string()).or_insert("1".to_string());
@@ -794,30 +818,38 @@ async fn execute_model_with_permissions(
 
         // Rebuild args exactly as above
         let mut args: Vec<String> = Vec::new();
-        match model_name {
-            "claude" => {
-                args.extend(
-                    [
-                        if read_only { "--allowedTools" } else { "--dangerously-skip-permissions" },
-                    ]
-                    .iter()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string()),
-                );
-                if read_only {
-                    args.push("Bash(ls:*), Bash(cat:*), Bash(grep:*), Bash(git status:*), Bash(git log:*), Bash(find:*), Read, Grep, Glob, LS, WebFetch, TodoRead, TodoWrite, WebSearch".to_string());
+        // Include configured args (mode‑specific preferred) first, to mirror the
+        // immediate-Command path above.
+        if let Some(ref cfg) = config {
+            if read_only {
+                if let Some(ro) = cfg.args_read_only.as_ref() {
+                    args.extend(ro.iter().cloned());
+                } else {
+                    args.extend(cfg.args.iter().cloned());
                 }
-                args.push("-p".to_string());
-                args.push(prompt.to_string());
+            } else if let Some(w) = cfg.args_write.as_ref() {
+                args.extend(w.iter().cloned());
+            } else {
+                args.extend(cfg.args.iter().cloned());
             }
-            "gemini" => {
-                args.extend(["-m".to_string(), "gemini-2.5-pro".to_string()]);
-                if !read_only { args.push("-y".to_string()); }
-                args.extend(["-p".to_string(), prompt.to_string()]);
+        }
+
+        match model_name {
+            "claude" | "gemini" | "qwen" => {
+                let mut defaults = crate::agent_defaults::default_params_for(model_name, read_only);
+                defaults.push("-p".into());
+                defaults.push(prompt.to_string());
+                args.extend(defaults);
             }
             "codex" | "code" => {
-                args.extend(["-s".to_string(), if read_only { "read-only" } else { "workspace-write" }.to_string()]);
-                args.extend(["-a".to_string(), "never".to_string(), "exec".to_string(), "--skip-git-repo-check".to_string(), prompt.to_string()]);
+                let have_mode_args = config.as_ref().map(|c| if read_only { c.args_read_only.is_some() } else { c.args_write.is_some() }).unwrap_or(false);
+                if have_mode_args {
+                    args.push(prompt.to_string());
+                } else {
+                    let mut defaults = crate::agent_defaults::default_params_for(model_name, read_only);
+                    defaults.push(prompt.to_string());
+                    args.extend(defaults);
+                }
             }
             _ => {}
         }
@@ -846,7 +878,15 @@ async fn execute_model_with_permissions(
                 .wait_with_output()
                 .await
                 .map_err(|e| format!("Failed to read output: {}", e))?,
-            Err(e) => return Err(format!("Failed to spawn sandboxed agent: {}", e)),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return Err(format!(
+                        "Required agent '{}' is not installed or not in PATH",
+                        command
+                    ));
+                }
+                return Err(format!("Failed to spawn sandboxed agent: {}", e));
+            }
         }
     } else {
         // Read-only path: use prior behavior
@@ -916,8 +956,8 @@ pub fn create_run_agent_tool() -> OpenAiTool {
     properties.insert(
         "model".to_string(),
         JsonSchema::String {
-            description: Some(
-                "Model: 'claude', 'gemini', or 'code' (or array of models for batch execution)"
+        description: Some(
+                "Model: 'claude', 'gemini', 'qwen', or 'code' (or array of models for batch execution)"
                     .to_string(),
             ),
         },

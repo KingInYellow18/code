@@ -127,7 +127,7 @@ impl ClaudeQuotaManager {
             return Err("Cannot allocate quota: limits reached".to_string());
         }
         
-        let session_id = Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
         
         // Calculate per-agent allocation based on auth type and concurrent limit

@@ -8,12 +8,84 @@ use serde_json;
 use std::path::PathBuf;
 use tokio;
 
-// Import our authentication modules
-mod auth;
-use auth::{
-    AuthenticationManager, ProviderType, ProviderSelectionStrategy, ClaudeSetupType,
-    convenience, migration::MigrationPhase,
+// Import our authentication modules from the library crate
+use claude_code_security::{
+    UnifiedAuthManager, ProviderType, FallbackStrategy,
+    ClaudeAuthConfig, AuthConfig,
 };
+
+// Simplified types for CLI compatibility
+// TODO: This is a temporary stub for compilation. Needs proper implementation.
+struct AuthenticationManager;
+
+impl AuthenticationManager {
+    async fn new(_codex_home: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        // Stub implementation - replace with proper UnifiedAuthManager integration
+        println!("Warning: Using stub AuthenticationManager - CLI functionality limited");
+        Ok(Self)
+    }
+
+    async fn add_claude_auth(&mut self, _setup: ClaudeSetupType) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Stub: Claude auth would be added here");
+        Ok(())
+    }
+
+    async fn update_provider_preference(&mut self, _strategy: ProviderSelectionStrategy) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Stub: Provider preference would be updated here");
+        Ok(())
+    }
+
+    fn print_status(&self, _detailed: bool) {
+        println!("Stub AuthenticationManager - Status: OK");
+    }
+
+    async fn get_system_status(&self) -> Result<SystemStatus, Box<dyn std::error::Error>> {
+        Ok(SystemStatus::default())
+    }
+}
+
+// Stub implementations for missing types (TODO: implement proper CLI integration)
+#[derive(Debug)]
+enum ClaudeSetupType {
+    ApiKey(String),
+}
+
+#[derive(Debug)]
+enum MigrationPhase {
+    Completed,
+    // Other phases can be added later
+}
+
+#[derive(Debug)]
+enum ProviderSelectionStrategy {
+    PreferClaude,
+    PreferOpenAI,
+    CostOptimized,
+    Adaptive,
+    BestSubscription,
+}
+
+mod convenience {
+    pub fn code_generation_context(_tokens: Option<u64>) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::new()
+    }
+}
+
+#[derive(Debug, Default)]
+struct SystemStatus {
+    provider_status: std::collections::HashMap<ProviderType, ProviderStatus>,
+}
+
+#[derive(Debug)]
+struct ProviderStatus {
+    authenticated: bool,
+    subscription_tier: Option<String>,
+}
+
+#[derive(Debug)]
+struct MigrationProgress {
+    phase: MigrationPhase,
+}
 
 #[derive(Parser)]
 #[command(name = "auth-cli")]

@@ -1,0 +1,366 @@
+# Claude Code Agent Configuration Profiles
+#
+# This configuration file defines different profiles for agents using Claude Code
+# authentication, allowing easy switching between different setups and use cases.
+
+[metadata]
+version = "1.0.0"
+description = "Claude Code agent configuration profiles"
+created = "2025-09-16"
+
+# Global Claude Code settings
+[claude_code]
+# Path to Claude Code binary (auto-detected if not specified)
+binary_path = "claude"
+
+# Default model for all agents (can be overridden per profile)
+default_model = "claude-sonnet-4-20250514"
+
+# Global timeout settings
+timeout_seconds = 600
+max_retries = 3
+retry_delay_seconds = 5
+
+# Authentication settings
+auth_check_interval_seconds = 300
+auto_refresh_tokens = true
+
+# Profile: Development Environment
+[profiles.development]
+name = "Development"
+description = "Configuration optimized for development and testing"
+environment = "development"
+
+[profiles.development.auth]
+provider_selection = "adaptive"
+enable_fallback = true
+preference_learning = true
+monitor_quota = false
+
+[profiles.development.concurrency]
+max_concurrent_agents = 12
+load_balance_agents = false
+enable_circuit_breaker = false
+
+[profiles.development.models]
+code_generation = "claude-sonnet-4-20250514"
+code_review = "claude-3-5-sonnet-20241022"
+documentation = "claude-3-5-haiku-20241022"
+analysis = "claude-sonnet-4-20250514"
+testing = "claude-3-5-sonnet-20241022"
+
+[profiles.development.logging]
+verbose = true
+log_requests = true
+log_responses = false
+performance_monitoring = true
+
+# Profile: Production Environment
+[profiles.production]
+name = "Production"
+description = "Conservative configuration for production environments"
+environment = "production"
+
+[profiles.production.auth]
+provider_selection = "best_subscription"
+enable_fallback = true
+preference_learning = false
+monitor_quota = true
+
+[profiles.production.concurrency]
+max_concurrent_agents = 8
+load_balance_agents = true
+enable_circuit_breaker = true
+circuit_breaker_threshold = 5
+circuit_breaker_timeout_seconds = 60
+
+[profiles.production.models]
+# Use more conservative model selection in production
+code_generation = "claude-sonnet-4-20250514"
+code_review = "claude-sonnet-4-20250514"  # Use best model for reviews
+documentation = "claude-3-5-sonnet-20241022"
+analysis = "claude-sonnet-4-20250514"
+testing = "claude-3-5-sonnet-20241022"
+
+[profiles.production.logging]
+verbose = false
+log_requests = true
+log_responses = false
+performance_monitoring = true
+audit_logging = true
+
+[profiles.production.security]
+require_authentication = true
+session_validation = true
+rate_limiting = true
+secure_token_storage = true
+
+# Profile: High Performance
+[profiles.high_performance]
+name = "High Performance"
+description = "Optimized for maximum throughput with Claude Max subscription"
+environment = "production"
+
+[profiles.high_performance.auth]
+provider_selection = "prefer_claude"
+enable_fallback = false  # Disable fallback for consistency
+preference_learning = true
+monitor_quota = true
+
+[profiles.high_performance.concurrency]
+max_concurrent_agents = 20
+load_balance_agents = true
+enable_circuit_breaker = true
+circuit_breaker_threshold = 10
+circuit_breaker_timeout_seconds = 30
+
+[profiles.high_performance.models]
+# Use fastest models where appropriate
+code_generation = "claude-sonnet-4-20250514"
+code_review = "claude-3-5-sonnet-20241022"
+documentation = "claude-3-5-haiku-20241022"  # Faster for docs
+analysis = "claude-sonnet-4-20250514"
+testing = "claude-3-5-haiku-20241022"  # Faster for test generation
+
+[profiles.high_performance.caching]
+auth_status_cache_seconds = 120
+provider_capabilities_cache_seconds = 1800
+response_cache_enabled = false  # Disable for real-time responses
+
+[profiles.high_performance.optimization]
+connection_pooling = true
+max_connections = 15
+connection_timeout_seconds = 30
+idle_timeout_seconds = 180
+
+# Profile: Cost Optimized
+[profiles.cost_optimized]
+name = "Cost Optimized"
+description = "Minimize API costs while maintaining functionality"
+environment = "any"
+
+[profiles.cost_optimized.auth]
+provider_selection = "cost_optimized"
+enable_fallback = true
+preference_learning = true
+monitor_quota = true
+
+[profiles.cost_optimized.concurrency]
+max_concurrent_agents = 4  # Lower concurrency to reduce costs
+load_balance_agents = true
+enable_circuit_breaker = true
+
+[profiles.cost_optimized.models]
+# Use more efficient models where possible
+code_generation = "claude-3-5-sonnet-20241022"  # Slightly cheaper
+code_review = "claude-sonnet-4-20250514"        # Use best for critical reviews
+documentation = "claude-3-5-haiku-20241022"     # Most cost-effective
+analysis = "claude-3-5-sonnet-20241022"
+testing = "claude-3-5-haiku-20241022"
+
+[profiles.cost_optimized.optimization]
+batch_requests = true
+request_deduplication = true
+response_caching = true
+cache_ttl_seconds = 3600
+
+# Profile: Enterprise
+[profiles.enterprise]
+name = "Enterprise"
+description = "Enterprise-grade configuration with full monitoring and security"
+environment = "enterprise"
+
+[profiles.enterprise.auth]
+provider_selection = "best_subscription"
+enable_fallback = true
+preference_learning = false  # Disable for predictable behavior
+monitor_quota = true
+
+[profiles.enterprise.concurrency]
+max_concurrent_agents = 25
+load_balance_agents = true
+enable_circuit_breaker = true
+circuit_breaker_threshold = 8
+circuit_breaker_timeout_seconds = 45
+
+[profiles.enterprise.models]
+code_generation = "claude-sonnet-4-20250514"
+code_review = "claude-sonnet-4-20250514"
+documentation = "claude-3-5-sonnet-20241022"
+analysis = "claude-sonnet-4-20250514"
+testing = "claude-3-5-sonnet-20241022"
+
+[profiles.enterprise.security]
+require_authentication = true
+session_validation = true
+rate_limiting = true
+secure_token_storage = true
+audit_all_requests = true
+compliance_logging = true
+
+[profiles.enterprise.monitoring]
+health_check_interval_seconds = 30
+performance_metrics = true
+usage_analytics = true
+alerting_enabled = true
+dashboard_enabled = true
+
+[profiles.enterprise.backup]
+config_backup_enabled = true
+usage_stats_backup = true
+backup_interval_hours = 6
+backup_retention_days = 30
+
+# Profile: Testing
+[profiles.testing]
+name = "Testing"
+description = "Configuration for automated testing and CI/CD"
+environment = "testing"
+
+[profiles.testing.auth]
+provider_selection = "user_choice_claude"
+enable_fallback = false  # Consistent behavior for tests
+preference_learning = false
+monitor_quota = false
+
+[profiles.testing.concurrency]
+max_concurrent_agents = 6
+load_balance_agents = false  # Deterministic for testing
+enable_circuit_breaker = false
+
+[profiles.testing.models]
+# Use consistent models for predictable test results
+code_generation = "claude-3-5-sonnet-20241022"
+code_review = "claude-3-5-sonnet-20241022"
+documentation = "claude-3-5-haiku-20241022"
+analysis = "claude-3-5-sonnet-20241022"
+testing = "claude-3-5-haiku-20241022"
+
+[profiles.testing.timeouts]
+request_timeout_seconds = 120  # Shorter timeouts for tests
+health_check_timeout_seconds = 10
+auth_check_timeout_seconds = 15
+
+[profiles.testing.logging]
+verbose = true
+log_requests = true
+log_responses = true  # Full logging for debugging tests
+performance_monitoring = false
+
+# Agent Type Specific Configurations
+[agent_types.code_generator]
+description = "Agents focused on code generation tasks"
+default_model = "claude-sonnet-4-20250514"
+estimated_tokens_per_request = 2000
+priority = "medium"
+supports_streaming = true
+requires_tools = true
+
+[agent_types.code_reviewer]
+description = "Agents for code review and analysis"
+default_model = "claude-sonnet-4-20250514"
+estimated_tokens_per_request = 3000
+priority = "high"
+supports_streaming = true
+requires_tools = false
+
+[agent_types.documentation]
+description = "Agents for documentation generation"
+default_model = "claude-3-5-haiku-20241022"
+estimated_tokens_per_request = 1500
+priority = "low"
+supports_streaming = true
+requires_tools = false
+
+[agent_types.analyst]
+description = "Agents for code analysis and optimization"
+default_model = "claude-sonnet-4-20250514"
+estimated_tokens_per_request = 4000
+priority = "medium"
+supports_streaming = true
+requires_tools = true
+
+[agent_types.tester]
+description = "Agents for test generation and validation"
+default_model = "claude-3-5-sonnet-20241022"
+estimated_tokens_per_request = 2500
+priority = "medium"
+supports_streaming = true
+requires_tools = true
+
+# Task-Specific Overrides
+[task_overrides]
+
+[task_overrides.critical_bug_fix]
+profile = "high_performance"
+model = "claude-sonnet-4-20250514"
+priority = "critical"
+max_concurrent = 2  # Focus resources
+timeout_seconds = 900
+
+[task_overrides.bulk_documentation]
+profile = "cost_optimized"
+model = "claude-3-5-haiku-20241022"
+priority = "low"
+max_concurrent = 8
+batch_processing = true
+
+[task_overrides.security_audit]
+profile = "enterprise"
+model = "claude-sonnet-4-20250514"
+priority = "high"
+audit_logging = true
+compliance_mode = true
+
+# Integration Settings
+[integrations]
+
+[integrations.sparc]
+enabled = true
+default_profile = "development"
+workflow_profiles = {
+    specification = "development",
+    pseudocode = "development",
+    architecture = "high_performance",
+    refinement = "production",
+    completion = "production"
+}
+
+[integrations.ci_cd]
+enabled = true
+default_profile = "testing"
+timeout_multiplier = 0.5  # Faster timeouts in CI
+max_parallel_jobs = 4
+
+[integrations.github]
+enabled = true
+pr_review_profile = "enterprise"
+issue_analysis_profile = "cost_optimized"
+documentation_profile = "cost_optimized"
+
+# Environment Variables Mapping
+[env_mapping]
+# Map environment variables to configuration values
+CLAUDE_CODE_BINARY = "claude_code.binary_path"
+CLAUDE_CODE_MODEL = "claude_code.default_model"
+CLAUDE_CODE_TIMEOUT = "claude_code.timeout_seconds"
+CODEX_PROFILE = "active_profile"
+CODEX_ENV = "environment"
+
+# Validation Rules
+[validation]
+required_fields = [
+    "claude_code.binary_path",
+    "claude_code.default_model"
+]
+
+model_whitelist = [
+    "claude-sonnet-4-20250514",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-haiku-20241022",
+    "claude-3-opus-20240229"
+]
+
+max_concurrent_agents_limit = 50
+min_timeout_seconds = 30
+max_timeout_seconds = 1800

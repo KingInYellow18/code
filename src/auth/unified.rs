@@ -4,6 +4,7 @@
 /// with intelligent provider selection and seamless fallback mechanisms.
 
 use super::claude::{ClaudeAuth, ClaudeAuthMode, ClaudeAuthError};
+use crate::providers::{ClaudeCodeProvider, ClaudeCodeConfig, ProviderFactory};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -23,6 +24,7 @@ pub enum ProviderType {
 pub enum AuthProvider {
     OpenAI(OpenAIAuth),
     Claude(ClaudeAuth),
+    ClaudeCode(crate::providers::ClaudeCodeProvider),
 }
 
 /// OpenAI authentication (simplified wrapper for existing types)
@@ -364,7 +366,7 @@ impl UnifiedAuthManager {
                 if let Some(estimated_tokens) = context.estimated_tokens {
                     let remaining_quota = claude_auth.get_remaining_quota().await
                         .map_err(|e| UnifiedAuthError::ClaudeError(e))?;
-                    
+
                     if remaining_quota < estimated_tokens {
                         return Ok(false);
                     }
@@ -378,6 +380,22 @@ impl UnifiedAuthManager {
                     }
                 }
 
+                Ok(true)
+            }
+            AuthProvider::ClaudeCode(claude_code_provider) => {
+                // Check if Claude Code provider is available and authenticated
+                if !claude_code_provider.is_available().await {
+                    return Ok(false);
+                }
+
+                // Check authentication status
+                if let Ok(auth_status) = claude_code_provider.get_auth_status().await {
+                    if !auth_status.authenticated {
+                        return Ok(false);
+                    }
+                }
+
+                // Claude Code is generally suitable for most tasks if authenticated
                 Ok(true)
             }
             AuthProvider::OpenAI(_) => {
@@ -396,9 +414,18 @@ impl UnifiedAuthManager {
             providers.insert(ProviderType::OpenAI, AuthProvider::OpenAI(openai_auth));
         }
 
-        // Load Claude authentication
+        // Load Claude authentication (legacy)
         if let Some(claude_auth) = ClaudeAuth::from_codex_home(&self.codex_home, ClaudeAuthMode::MaxSubscription, "unified_auth") {
             providers.insert(ProviderType::Claude, AuthProvider::Claude(claude_auth));
+        }
+
+        // Load Claude Code provider (preferred)
+        if let Ok(claude_code_config) = ClaudeCodeConfig::from_codex_home(&self.codex_home) {
+            if let Ok(claude_code_provider) = ClaudeCodeProvider::new(claude_code_config).await {
+                if claude_code_provider.is_available().await {
+                    providers.insert(ProviderType::Claude, AuthProvider::ClaudeCode(claude_code_provider));
+                }
+            }
         }
 
         *self.providers.write().await = providers;
@@ -452,52 +479,51 @@ impl UnifiedAuthManager {
     async fn get_provider_status(&self, provider: &AuthProvider) -> ProviderStatus {
         match provider {
             AuthProvider::Claude(claude_auth) => {
-                let mut status = ProviderStatus {
+                let available = true; // If loaded, it's available
+                let authenticated = claude_auth.get_token().await.is_ok();
+                let subscription_tier = claude_auth.subscription_tier.clone();
+                let quota_remaining = claude_auth.get_remaining_quota().await.ok();
+
+                ProviderStatus {
                     provider_type: ProviderType::Claude,
-                    available: true,
-                    authenticated: false,
-                    subscription_tier: claude_auth.subscription_tier.clone(),
-                    quota_remaining: None,
-                    rate_limit_status: RateLimitStatus {
-                        requests_remaining: None,
-                        tokens_remaining: None,
-                        reset_time: None,
-                        current_usage: 0.0,
-                    },
+                    available,
+                    authenticated,
+                    subscription_tier,
+                    quota_remaining,
+                    rate_limit_status: RateLimitStatus::default(),
                     last_verified: Some(Utc::now()),
                     error_message: None,
-                };
-
-                // Test authentication
-                match claude_auth.get_token().await {
-                    Ok(_) => {
-                        status.authenticated = true;
-                        
-                        // Get quota information
-                        if let Ok(remaining) = claude_auth.get_remaining_quota().await {
-                            status.quota_remaining = Some(remaining);
-                        }
-                    }
-                    Err(e) => {
-                        status.error_message = Some(e.to_string());
-                    }
                 }
+            }
+            AuthProvider::ClaudeCode(claude_code_provider) => {
+                let available = claude_code_provider.is_available().await;
+                let auth_status = claude_code_provider.get_auth_status().await.ok();
+                let authenticated = auth_status.as_ref().map(|s| s.authenticated).unwrap_or(false);
+                let subscription_tier = auth_status.as_ref().and_then(|s| s.subscription_tier.clone());
+                let error_message = auth_status.as_ref().and_then(|s| s.error_message.clone());
 
-                status
+                ProviderStatus {
+                    provider_type: ProviderType::Claude,
+                    available,
+                    authenticated,
+                    subscription_tier,
+                    quota_remaining: None, // Claude Code doesn't provide quota info
+                    rate_limit_status: RateLimitStatus::default(),
+                    last_verified: Some(Utc::now()),
+                    error_message,
+                }
             }
             AuthProvider::OpenAI(openai_auth) => {
+                let available = true; // If loaded, it's available
+                let authenticated = openai_auth.api_key.is_some() || openai_auth.has_tokens;
+
                 ProviderStatus {
                     provider_type: ProviderType::OpenAI,
-                    available: true,
-                    authenticated: openai_auth.api_key.is_some() || openai_auth.has_tokens,
+                    available,
+                    authenticated,
                     subscription_tier: None,
                     quota_remaining: None,
-                    rate_limit_status: RateLimitStatus {
-                        requests_remaining: None,
-                        tokens_remaining: None,
-                        reset_time: None,
-                        current_usage: 0.0,
-                    },
+                    rate_limit_status: RateLimitStatus::default(),
                     last_verified: Some(Utc::now()),
                     error_message: None,
                 }
@@ -521,18 +547,18 @@ impl UnifiedAuthManager {
         }
     }
 
-    /// Record usage for learning
+    /// Record usage for learning with enhanced metrics
     pub async fn record_usage(&self, provider_type: ProviderType, context: &AuthContext, success: bool, response_time_ms: f64) {
         if !self.config.preference_learning_enabled {
             return;
         }
 
         let mut usage_stats = self.usage_stats.write().await;
-        
+
         // Update provider usage
         let provider_usage = usage_stats.provider_usage.entry(provider_type.clone()).or_insert_with(|| ProviderUsage {
             requests_count: 0,
-            tokens_used: 0,
+            tokens_used: context.estimated_tokens.unwrap_or(0),
             success_count: 0,
             error_count: 0,
             average_response_time_ms: 0.0,
@@ -541,33 +567,54 @@ impl UnifiedAuthManager {
 
         provider_usage.requests_count += 1;
         provider_usage.last_used = Utc::now();
-        
+
+        // Add estimated tokens to usage tracking
+        if let Some(estimated_tokens) = context.estimated_tokens {
+            provider_usage.tokens_used += estimated_tokens;
+        }
+
         if success {
             provider_usage.success_count += 1;
         } else {
             provider_usage.error_count += 1;
         }
 
-        // Update average response time
-        provider_usage.average_response_time_ms = 
-            (provider_usage.average_response_time_ms * (provider_usage.requests_count - 1) as f64 + response_time_ms) / 
-            provider_usage.requests_count as f64;
+        // Update average response time with more sophisticated calculation
+        let total_time = provider_usage.average_response_time_ms * (provider_usage.requests_count - 1) as f64;
+        provider_usage.average_response_time_ms = (total_time + response_time_ms) / provider_usage.requests_count as f64;
 
-        // Update task type preferences (only for successful requests)
+        // Update task type preferences with weighted scoring
         if success {
             let task_type_key = format!("{:?}", context.task_type);
-            usage_stats.task_type_preferences.insert(task_type_key, provider_type.clone());
+
+            // Weight successful fast responses more heavily
+            let performance_score = if response_time_ms < 1000.0 { 1.5 } else { 1.0 };
+            let priority_weight = match context.priority {
+                Priority::Critical => 2.0,
+                Priority::High => 1.5,
+                Priority::Medium => 1.0,
+                Priority::Low => 0.8,
+            };
+
+            // Only update preference if this was a good experience
+            if performance_score * priority_weight > 1.0 {
+                usage_stats.task_type_preferences.insert(task_type_key, provider_type.clone());
+            }
         }
 
         // Update success rates
         let success_rate = provider_usage.success_count as f64 / provider_usage.requests_count as f64;
-        usage_stats.success_rates.insert(provider_type, success_rate);
+        usage_stats.success_rates.insert(provider_type.clone(), success_rate);
+
+        // Update average response times
+        usage_stats.average_response_times.insert(provider_type, provider_usage.average_response_time_ms);
 
         usage_stats.total_requests += 1;
         usage_stats.last_updated = Utc::now();
 
-        // Save to disk periodically
-        if usage_stats.total_requests % 10 == 0 {
+        // Save to disk periodically with exponential backoff
+        let save_interval = if usage_stats.total_requests < 100 { 10 } else { 50 };
+        if usage_stats.total_requests % save_interval == 0 {
             let _ = self.save_usage_stats().await;
         }
     }
@@ -636,6 +683,9 @@ pub enum UnifiedAuthError {
     
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+
+    #[error("Secure storage error: {0}")]
+    SecureStorage(#[from] crate::security::SecureStorageError),
     
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),

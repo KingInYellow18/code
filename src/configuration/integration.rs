@@ -137,9 +137,10 @@ impl From<AuthConfigToml> for AuthConfig {
 }
 
 /// Integration layer for existing Config struct
+#[derive(Debug)]
 pub struct ConfigIntegration {
-    config_manager: UnifiedConfigManager,
-    existing_config_path: PathBuf,
+    pub config_manager: UnifiedConfigManager,
+    pub existing_config_path: PathBuf,
 }
 
 impl ConfigIntegration {
@@ -248,11 +249,18 @@ impl ConfigIntegration {
         // Add/update auth section
         let auth_toml = AuthConfigToml::from(auth_config.clone());
         
-        // Convert to TOML value
-        let auth_value = toml::to_string(&auth_toml)
-            .map_err(|e| ConfigError::Toml(e.into()))?;
-        let auth_table: toml_edit::Table = auth_value.parse()
-            .map_err(|_| ConfigError::Toml(toml::de::Error::custom("Failed to parse auth config")))?;
+        // Convert to TOML value using serde_json as intermediate format
+        let auth_json = serde_json::to_value(&auth_toml)
+            .map_err(|e| ConfigError::Storage(crate::configuration::unified_storage::StorageError::Json(e)))?;
+
+        // Convert to toml_edit format
+        let mut auth_table = toml_edit::Table::new();
+        if let serde_json::Value::Object(map) = auth_json {
+            for (key, value) in map {
+                let toml_value = json_to_toml_value(value);
+                auth_table.insert(&key, toml_edit::Item::Value(toml_value));
+            }
+        }
 
         doc["auth"] = toml_edit::Item::Table(auth_table);
 
@@ -360,6 +368,35 @@ pub struct AuthErrorContext {
     pub retry_count: u32,
 }
 
+/// Helper function to convert JSON value to TOML value
+fn json_to_toml_value(json_value: serde_json::Value) -> toml_edit::Value {
+    match json_value {
+        serde_json::Value::Null => toml_edit::Value::from(""),
+        serde_json::Value::Bool(b) => toml_edit::Value::from(b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                toml_edit::Value::from(i)
+            } else if let Some(f) = n.as_f64() {
+                toml_edit::Value::from(f)
+            } else {
+                toml_edit::Value::from(n.to_string())
+            }
+        },
+        serde_json::Value::String(s) => toml_edit::Value::from(s),
+        serde_json::Value::Array(arr) => {
+            let mut toml_array = toml_edit::Array::new();
+            for item in arr {
+                toml_array.push(json_to_toml_value(item));
+            }
+            toml_edit::Value::Array(toml_array)
+        },
+        serde_json::Value::Object(_) => {
+            // For nested objects, convert to string for simplicity
+            toml_edit::Value::from(json_value.to_string())
+        },
+    }
+}
+
 /// Helper functions for existing code integration
 pub mod integration_helpers {
     use super::*;
@@ -421,7 +458,7 @@ mod tests {
         let selection = ProviderSelection {
             preferred_provider: ProviderType::Claude,
             enable_fallback: true,
-            fallback_strategy: super::auth_config::FallbackStrategy::Automatic,
+            fallback_strategy: crate::FallbackStrategy::Automatic,
             openai_available: true,
             claude_available: false,
         };
@@ -441,7 +478,7 @@ mod tests {
         let selection = ProviderSelection {
             preferred_provider: ProviderType::Claude,
             enable_fallback: true,
-            fallback_strategy: super::auth_config::FallbackStrategy::Automatic,
+            fallback_strategy: crate::FallbackStrategy::Automatic,
             openai_available: true,
             claude_available: false,
         };
@@ -461,19 +498,19 @@ mod tests {
         let selection = ProviderSelection {
             preferred_provider: ProviderType::Claude,
             enable_fallback: true,
-            fallback_strategy: super::auth_config::FallbackStrategy::OnQuotaExhausted,
+            fallback_strategy: crate::FallbackStrategy::OnQuotaExhausted,
             openai_available: true,
             claude_available: true,
         };
 
         let quota_error = AuthErrorContext {
-            error_type: super::auth_config::AuthErrorType::QuotaExhausted,
+            error_type: crate::configuration::auth_config::AuthErrorType::QuotaExhausted,
             provider: ProviderType::Claude,
             retry_count: 0,
         };
 
         let auth_error = AuthErrorContext {
-            error_type: super::auth_config::AuthErrorType::AuthenticationFailed,
+            error_type: crate::configuration::auth_config::AuthErrorType::AuthenticationFailed,
             provider: ProviderType::Claude,
             retry_count: 0,
         };

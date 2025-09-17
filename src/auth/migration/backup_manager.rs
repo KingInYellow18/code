@@ -82,7 +82,7 @@ impl BackupManager {
         }
 
         // Generate unique backup ID
-        let backup_id = Uuid::new_v4().to_string();
+        let backup_id = uuid::Uuid::new_v4().to_string();
         let timestamp = Utc::now();
         let backup_filename = format!("auth_backup_{}_{}.json", 
             timestamp.format("%Y%m%d_%H%M%S"), 

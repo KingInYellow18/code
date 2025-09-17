@@ -181,7 +181,7 @@ impl UnifiedAuthStorage {
             version: 2,
             openai_auth,
             claude_auth: None,
-            preferred_provider: super::ProviderType::OpenAI,
+            preferred_provider: crate::ProviderType::OpenAI,
             last_provider_check: None,
             last_subscription_check: None,
             provider_capabilities: HashMap::new(),
@@ -215,7 +215,7 @@ pub struct UnifiedAuthJson {
     pub claude_auth: Option<ClaudeAuthData>,
     
     /// Currently preferred provider
-    pub preferred_provider: super::ProviderType,
+    pub preferred_provider: crate::ProviderType,
     
     /// Last time provider availability was checked
     pub last_provider_check: Option<DateTime<Utc>>,
@@ -238,7 +238,7 @@ impl Default for UnifiedAuthJson {
             version: 2,
             openai_auth: None,
             claude_auth: None,
-            preferred_provider: super::ProviderType::OpenAI,
+            preferred_provider: crate::ProviderType::OpenAI,
             last_provider_check: None,
             last_subscription_check: None,
             provider_capabilities: HashMap::new(),
@@ -353,15 +353,15 @@ struct LegacyAuthJson {
 
 /// Abstract authentication data trait
 pub trait AuthData: Send + Sync {
-    fn provider_type(&self) -> super::ProviderType;
+    fn provider_type(&self) -> crate::ProviderType;
     fn is_authenticated(&self) -> bool;
     fn needs_refresh(&self) -> bool;
     fn expires_at(&self) -> Option<DateTime<Utc>>;
 }
 
 impl AuthData for OpenAIAuthData {
-    fn provider_type(&self) -> super::ProviderType {
-        super::ProviderType::OpenAI
+    fn provider_type(&self) -> crate::ProviderType {
+        crate::ProviderType::OpenAI
     }
 
     fn is_authenticated(&self) -> bool {
@@ -383,8 +383,8 @@ impl AuthData for OpenAIAuthData {
 }
 
 impl AuthData for ClaudeAuthData {
-    fn provider_type(&self) -> super::ProviderType {
-        super::ProviderType::Claude
+    fn provider_type(&self) -> crate::ProviderType {
+        crate::ProviderType::Claude
     }
 
     fn is_authenticated(&self) -> bool {
@@ -454,7 +454,7 @@ mod tests {
     fn test_default_unified_auth_json() {
         let auth_json = UnifiedAuthJson::default();
         assert_eq!(auth_json.version, 2);
-        assert_eq!(auth_json.preferred_provider, super::ProviderType::OpenAI);
+        assert_eq!(auth_json.preferred_provider, crate::ProviderType::OpenAI);
         assert!(auth_json.openai_auth.is_none());
         assert!(auth_json.claude_auth.is_none());
     }
@@ -481,7 +481,7 @@ mod tests {
             tokens: None,
             subscription: None,
         };
-        assert_eq!(auth_data.provider_type(), super::ProviderType::Claude);
+        assert_eq!(auth_data.provider_type(), crate::ProviderType::Claude);
     }
 
     #[tokio::test]
@@ -527,7 +527,7 @@ mod tests {
                 tokens: None,
                 subscription: None,
             }),
-            preferred_provider: super::ProviderType::Claude,
+            preferred_provider: crate::ProviderType::Claude,
             last_provider_check: Some(Utc::now()),
             last_subscription_check: None,
             provider_capabilities: HashMap::new(),

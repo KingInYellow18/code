@@ -199,7 +199,7 @@ impl MemoryOptimizer {
         agent_id: &str,
         estimated_memory_mb: u64,
     ) -> Result<String, MemoryError> {
-        let session_id = Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
         let estimated_bytes = estimated_memory_mb * 1024 * 1024;
 
         // Check if allocation would exceed limits

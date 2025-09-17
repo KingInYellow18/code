@@ -4,8 +4,9 @@ use chrono::{DateTime, Utc, Duration};
 use thiserror::Error;
 
 use crate::security::{
-    SecureTokenStorage, SecureOAuthFlow, OAuthSecurityManager, 
-    SessionSecurityManager, SecurityError, audit_logger
+    SecureTokenStorage, SecureOAuthFlow, OAuthSecurityManager,
+    SessionSecurityManager, SecurityError, audit_logger, AuditLogError,
+    SecureStorageError, SessionSecurityError, OAuthSecurityError
 };
 
 /// Enhanced secure Claude authentication with comprehensive security measures
@@ -33,6 +34,22 @@ pub enum ClaudeAuthError {
     Network(#[from] reqwest::Error),
     #[error("Invalid configuration: {0}")]
     InvalidConfiguration(String),
+    #[error("JSON serialization error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("Storage error: {0}")]
+    Storage(String),
+    #[error("Audit error: {0}")]
+    Audit(String),
+    #[error("OAuth security error: {0}")]
+    OAuth(String),
+    #[error("Secure storage error: {0}")]
+    SecureStorage(#[from] SecureStorageError),
+    #[error("Audit log error: {0}")]
+    AuditLog(#[from] AuditLogError),
+    #[error("Session security error: {0}")]
+    SessionSecurity(#[from] SessionSecurityError),
+    #[error("OAuth security error: {0}")]
+    OAuthSecurity(#[from] OAuthSecurityError),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,7 +182,8 @@ impl SecureClaudeAuth {
             .ok_or_else(|| ClaudeAuthError::AuthenticationFailed("OAuth session not found".to_string()))?;
 
         // Validate callback parameters
-        let token_request = flow.validate_callback(code, state, error)?;
+        let token_request = flow.validate_callback(code, state, error)
+            .map_err(|e| ClaudeAuthError::OAuth(e.to_string()))?;
 
         // Exchange code for tokens
         let tokens = self.exchange_authorization_code(&token_request).await?;
@@ -448,6 +466,101 @@ impl SecureClaudeAuth {
         } else {
             Ok(None)
         }
+    }
+
+    /// Create ClaudeAuth from API key
+    pub fn from_api_key(api_key: &str) -> Self {
+        let config = ClaudeAuthConfig {
+            client_id: "api_key_client".to_string(),
+            auth_endpoint: "".to_string(),
+            token_endpoint: "".to_string(),
+            subscription_endpoint: "https://api.anthropic.com/v1/subscription".to_string(),
+            redirect_uri: "".to_string(),
+            scopes: vec!["api".to_string()],
+            require_max_subscription: false,
+            enable_subscription_check: true,
+        };
+
+        let storage_path = std::env::temp_dir().join("claude_api_tokens.json");
+        let mut auth = Self::new(config, storage_path).expect("Failed to create auth instance");
+
+        // Store API key as access token
+        let token_data = crate::security::secure_token_storage::TokenData {
+            access_token: api_key.to_string(),
+            refresh_token: "".to_string(),
+            id_token: "".to_string(),
+            expires_at: Utc::now() + Duration::days(365), // API keys don't expire
+            account_id: None,
+            provider: "claude".to_string(),
+        };
+        auth.storage.store_tokens(&token_data).ok();
+
+        auth
+    }
+
+    /// Create ClaudeAuth from OAuth tokens
+    pub fn from_oauth_tokens(
+        access_token: String,
+        refresh_token: String,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Self, ClaudeAuthError> {
+        let config = ClaudeAuthConfig::default();
+        let storage_path = std::env::temp_dir().join("claude_oauth_tokens.json");
+        let mut auth = Self::new(config, storage_path)?;
+
+        // Store OAuth tokens
+        let token_data = crate::security::secure_token_storage::TokenData {
+            access_token,
+            refresh_token,
+            id_token: "".to_string(),
+            expires_at,
+            account_id: None,
+            provider: "claude".to_string(),
+        };
+        auth.storage.store_tokens(&token_data)?;
+
+        Ok(auth)
+    }
+
+    /// Check if has max subscription
+    pub async fn has_max_subscription(&self) -> bool {
+        if let Ok(Some(tokens)) = self.get_stored_tokens() {
+            if let Ok(subscription) = self.verify_subscription(&tokens.access_token).await {
+                return subscription.tier == "max" || subscription.tier == "pro";
+            }
+        }
+        false
+    }
+
+    /// Get authentication token
+    pub async fn get_token(&mut self) -> Result<String, ClaudeAuthError> {
+        if let Some(tokens) = self.get_stored_tokens()? {
+            // Check if token needs refresh
+            if tokens.expires_at <= Utc::now() + Duration::minutes(5) {
+                // Token is expiring soon, try to refresh
+                if !tokens.refresh_token.is_empty() {
+                    let new_tokens = self.refresh_tokens("default_session").await?;
+                    return Ok(new_tokens.access_token);
+                }
+            }
+            Ok(tokens.access_token)
+        } else {
+            Err(ClaudeAuthError::AuthenticationFailed("No tokens available".to_string()))
+        }
+    }
+
+    /// Check if token refresh is needed
+    pub async fn needs_token_refresh(&self) -> bool {
+        if let Ok(Some(tokens)) = self.get_stored_tokens() {
+            return tokens.expires_at <= Utc::now() + Duration::minutes(5);
+        }
+        true // If no tokens, refresh is needed
+    }
+
+    /// Refresh token
+    pub async fn refresh_token(&mut self) -> Result<String, ClaudeAuthError> {
+        let new_tokens = self.refresh_tokens("default_session").await?;
+        Ok(new_tokens.access_token)
     }
 
     /// Exchange authorization code for tokens

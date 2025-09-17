@@ -132,7 +132,7 @@ impl UnifiedConfigManager {
         self.validator.validate(config)?;
         
         // Save unified auth data
-        self.auth_storage.save(&config.auth_data).await?;
+        self.auth_storage.save(&config.auth_data)?;
         
         // Update base configuration if needed
         self.save_base_config(config)?;
@@ -209,7 +209,8 @@ impl UnifiedConfigManager {
         };
 
         let content = toml::to_string_pretty(&base_config)?;
-        std::fs::write(&self.base_config_path, content)?;
+        std::fs::write(&self.base_config_path, content)
+            .map_err(|e| ConfigError::Io(e))?;
         
         Ok(())
     }
@@ -246,11 +247,17 @@ pub enum ConfigError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     
-    #[error("TOML serialization error: {0}")]
+    #[error("TOML deserialization error: {0}")]
     Toml(#[from] toml::de::Error),
+
+    #[error("TOML serialization error: {0}")]
+    TomlSer(#[from] toml::ser::Error),
     
     #[error("Storage error: {0}")]
     Storage(#[from] StorageError),
+
+    #[error("Secure storage error: {0}")]
+    SecureStorage(#[from] crate::security::SecureStorageError),
     
     #[error("Migration failed: {0}")]
     MigrationFailed(#[from] MigrationError),

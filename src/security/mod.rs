@@ -14,7 +14,7 @@ pub mod session_security;
 
 pub use secure_token_storage::{SecureTokenStorage, SecureStorageError};
 pub use oauth_security::{SecureOAuthFlow, OAuthSecurityManager, OAuthSecurityError};
-pub use audit_logger::{SecurityAuditLogger, AuditEvent, AuthEventType, Severity};
+pub use audit_logger::{SecurityAuditLogger, AuditEvent, AuthEventType, Severity, AuditLogError};
 pub use session_security::{SessionSecurityManager, SecureSession, SessionSecurityError};
 
 use std::path::PathBuf;

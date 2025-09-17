@@ -13,10 +13,23 @@ use super::unified_storage::{UnifiedAuthJson, OpenAIAuthData, ClaudeAuthData, Au
 use super::UnifiedConfig;
 
 /// Configuration validator
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ConfigValidator {
     rules: Vec<Box<dyn ValidationRule>>,
     strict_mode: bool,
+}
+
+impl Clone for ConfigValidator {
+    fn clone(&self) -> Self {
+        let cloned_rules = self.rules.iter()
+            .map(|rule| rule.clone_rule())
+            .collect();
+
+        Self {
+            rules: cloned_rules,
+            strict_mode: self.strict_mode,
+        }
+    }
 }
 
 impl Default for ConfigValidator {
@@ -152,10 +165,13 @@ pub struct ValidationContext<'a> {
 }
 
 /// Validation rule trait
-pub trait ValidationRule: Send + Sync {
+pub trait ValidationRule: Send + Sync + std::fmt::Debug {
     fn validate(&self, context: &ValidationContext) -> Result<RuleResult, ValidationError>;
     fn name(&self) -> &'static str;
     fn priority(&self) -> u8 { 50 } // Lower number = higher priority
+
+    /// Clone the validation rule for trait object cloning
+    fn clone_rule(&self) -> Box<dyn ValidationRule>;
 }
 
 /// Basic integrity validation rule
@@ -169,7 +185,7 @@ impl ValidationRule for BasicIntegrityRule {
 
         // Check for basic configuration completeness
         let config = &context.config;
-        
+
         // Validate timeout values
         if config.auth.auth_timeout < Duration::seconds(1) {
             issues.push("Auth timeout is too low (minimum 1 second)".to_string());
@@ -196,6 +212,10 @@ impl ValidationRule for BasicIntegrityRule {
 
     fn priority(&self) -> u8 {
         10
+    }
+
+    fn clone_rule(&self) -> Box<dyn ValidationRule> {
+        Box::new(self.clone())
     }
 }
 
@@ -258,6 +278,10 @@ impl ValidationRule for AuthenticationRule {
 
     fn priority(&self) -> u8 {
         20
+    }
+
+    fn clone_rule(&self) -> Box<dyn ValidationRule> {
+        Box::new(self.clone())
     }
 }
 
@@ -355,6 +379,10 @@ impl ValidationRule for SecurityRule {
     fn priority(&self) -> u8 {
         30
     }
+
+    fn clone_rule(&self) -> Box<dyn ValidationRule> {
+        Box::new(self.clone())
+    }
 }
 
 /// Token validity validation rule
@@ -413,6 +441,10 @@ impl ValidationRule for TokenValidityRule {
     fn priority(&self) -> u8 {
         40
     }
+
+    fn clone_rule(&self) -> Box<dyn ValidationRule> {
+        Box::new(self.clone())
+    }
 }
 
 /// Configuration consistency validation rule
@@ -463,6 +495,10 @@ impl ValidationRule for ConfigurationConsistencyRule {
 
     fn priority(&self) -> u8 {
         50
+    }
+
+    fn clone_rule(&self) -> Box<dyn ValidationRule> {
+        Box::new(self.clone())
     }
 }
 
@@ -524,6 +560,10 @@ impl ValidationRule for ProviderAvailabilityRule {
 
     fn priority(&self) -> u8 {
         60
+    }
+
+    fn clone_rule(&self) -> Box<dyn ValidationRule> {
+        Box::new(self.clone())
     }
 }
 

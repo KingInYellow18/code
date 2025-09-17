@@ -44,8 +44,13 @@ pub use configuration::{
 pub mod performance;
 pub use performance::{
     PerformanceCoordinator, PerformanceMetrics, PerformanceTargets,
-    integration::{OptimizedAuthManager, PerformanceStatistics, OptimizationConfig},
-    benchmarks::{PerformanceBenchmarks, BenchmarkSuiteResults, run_phase5_compliance_benchmark},
+};
+
+// AI Provider integrations
+pub mod providers;
+pub use providers::{
+    ClaudeCodeProvider, ClaudeCodeConfig, ClaudeCodeError,
+    ProviderFactory, AIProvider, AuthStatus, ProviderCapabilities,
 };
 
 /// Initialize the complete security subsystem

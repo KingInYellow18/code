@@ -14,6 +14,20 @@ pub use secure_claude_auth::{
     AuthenticationResult,
 };
 
+// Type aliases for backwards compatibility and simplified imports
+pub type ClaudeAuth = SecureClaudeAuth;
+
+/// Claude authentication mode enum for configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ClaudeAuthMode {
+    /// API key based authentication
+    ApiKey,
+    /// OAuth based authentication
+    OAuth,
+    /// Session token based authentication
+    SessionToken,
+}
+
 use std::path::PathBuf;
 use crate::security::SecurityConfig;
 

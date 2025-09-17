@@ -349,7 +349,7 @@ impl PerformanceMonitor {
 
     /// Health check loop
     async fn run_health_check_loop(&self) {
-        let mut interval = interval(Duration::from_secs(self.config.health_check_interval_minutes * 60));
+        let mut interval = interval(Duration::from_secs((self.config.health_check_interval_minutes * 60) as u64));
         
         loop {
             interval.tick().await;
@@ -449,7 +449,7 @@ impl PerformanceMonitor {
         {
             let cooldowns_guard = self.alert_cooldowns.read().await;
             if let Some(last_alert) = cooldowns_guard.get(metric_name) {
-                if last_alert.elapsed() < Duration::from_secs(self.config.alert_cooldown_minutes * 60) {
+                if last_alert.elapsed() < Duration::from_secs((self.config.alert_cooldown_minutes * 60) as u64) {
                     return; // Still in cooldown
                 }
             }
@@ -489,7 +489,7 @@ impl PerformanceMonitor {
         level: AlertLevel,
         description: &str,
     ) {
-        let alert_id = Uuid::new_v4().to_string();
+        let alert_id = uuid::Uuid::new_v4().to_string();
         
         let alert = PerformanceAlert {
             id: alert_id.clone(),
@@ -828,7 +828,7 @@ impl PerformanceMonitor {
     /// Cleanup alert cooldowns
     async fn cleanup_alert_cooldowns(&self) {
         let mut cooldowns_guard = self.alert_cooldowns.write().await;
-        let cooldown_duration = Duration::from_secs(self.config.alert_cooldown_minutes * 60);
+        let cooldown_duration = Duration::from_secs((self.config.alert_cooldown_minutes * 60) as u64);
         
         cooldowns_guard.retain(|_, last_alert| {
             last_alert.elapsed() < cooldown_duration

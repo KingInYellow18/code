@@ -135,7 +135,7 @@ impl TokenOptimizer {
         priority: RefreshPriority,
         deadline: Option<DateTime<Utc>>,
     ) -> String {
-        let request_id = Uuid::new_v4().to_string();
+        let request_id = uuid::Uuid::new_v4().to_string();
         
         let request = TokenRefreshRequest {
             request_id: request_id.clone(),
@@ -256,7 +256,7 @@ impl TokenOptimizer {
         let _permit = self.batch_semaphore.acquire().await.unwrap();
         
         let batch_start = Instant::now();
-        let batch_id = Uuid::new_v4().to_string();
+        let batch_id = uuid::Uuid::new_v4().to_string();
         
         // Mark all requests as in progress
         {
